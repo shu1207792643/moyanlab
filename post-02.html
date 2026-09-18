@@ -407,49 +407,9 @@ h1{
 .site-foot a:hover{color:var(--text-2)}
 .foot-links{display:flex;flex-wrap:wrap;justify-content:center;gap:6px 22px}
 .foot-note{font-family:var(--mono);font-size:10.5px;letter-spacing:.055em;color:#454c5e}
+.foot-stack{font-family:var(--mono);font-size:11px;letter-spacing:.05em;color:#64748b;margin-top:7px}
 .foot-note.tagline{font-family:var(--font);font-size:11.5px;letter-spacing:.02em;color:var(--dim);
   padding:5px 14px;border-radius:999px;border:1px dashed rgba(255,255,255,.14)}
-
-/* ============================================================
-   页脚备案信息（工信部 ICP + 公安联网备案）
-   ============================================================ */
-.beian{
-  display:flex;
-  flex-wrap:wrap;                /* 小屏自动换行 */
-  justify-content:center;
-  align-items:center;
-  gap:6px 20px;                  /* 行间距 6px / 两项间距 20px */
-}
-/* 选择器前缀 .site-foot 用于压过页面里已有的 .site-foot a / .site-foot a:hover 泛化规则 */
-.site-foot .beian-item{
-  display:inline-flex;
-  align-items:center;
-  gap:4px;                       /* 警徽与文字的间距 */
-  font-size:12px;
-  line-height:1;
-  letter-spacing:.04em;
-  color:#8b949e;                 /* 低反差暗灰 */
-  text-decoration:none;          /* 无下划线 */
-  white-space:nowrap;
-  transition:color .3s var(--ease, ease);
-}
-.site-foot .beian-item:hover{
-  color:#c9d1d9;                 /* 悬停提亮，平滑微过渡 */
-}
-.site-foot .beian-item:focus-visible{
-  color:#c9d1d9;
-  outline:1.5px solid rgba(255,138,61,.85);
-  outline-offset:3px;
-  border-radius:4px;
-}
-.beian-badge{
-  width:16px;
-  height:16px;
-  flex:0 0 16px;
-  border:0;
-  object-fit:contain;
-  vertical-align:middle;         /* 兜底：即使脱离 flex 也垂直居中 */
-}
 
 /* ============================================================
    响应式：目录按 gutter 实际可用宽度收放
@@ -489,21 +449,6 @@ h1{
   .toc a.active::before,.end-dot{box-shadow:none}
 }
 </style>
-
-<!-- ============ 百度统计（异步加载，不阻塞 DOM 解析与首屏） ============ -->
-<script>
-(function () {
-  /* 32 位密钥留空占位：填入即生效；未填则跳过，不会发出无效请求 */
-  const BAIDU_TONGJI_KEY = "47d7efdf8e8b59d517086a0f5a7a1607"; // <--- 在此处填入百度统计后台给出的 32 位密钥
-  if (BAIDU_TONGJI_KEY.indexOf("PASTE_") === 0) return;
-  window._hmt = window._hmt || [];   /* 脚本加载前 _hmt.push 的事件不会丢 */
-  var hm = document.createElement("script");
-  hm.src = "https://hm.baidu.com/hm.js?" + BAIDU_TONGJI_KEY;
-  hm.async = true;                   /* 异步拉取，不阻塞首屏 */
-  var s = document.getElementsByTagName("script")[0];
-  s.parentNode.insertBefore(hm, s);
-})();
-</script>
 </head>
 <body>
 
@@ -640,7 +585,7 @@ h1{
           </p>
           <p>
             与之形成荒诞反差的，是另一群人：老老实实租云主机、做域名实名认证、
-            走完工信部 ICP 与公安联网两套合规备案、手写 Nginx 与证书、
+            完成全球边缘 CDN 节点架构部署，正式上线、手写 Nginx 与证书、
             把基础设施一层一层搭起来的独立开发者——也就是愿意把博客认认真真挂在自己域名下的那批人。
           </p>
           <p>一边拔网线就跑，一边把根扎在自己手里。你说魔幻不魔幻。</p>
@@ -733,27 +678,11 @@ h1{
     <a href="index.html">文章</a>
     <a href="index.html#stack">技术底座</a>
     <a href="index.html#about">关于博主</a>
-    <a href="https://moyanlab.cn" target="_blank" rel="noopener">RSS</a>
+    <a href="https://moyanlab.vercel.app" target="_blank" rel="noopener">RSS</a>
   </nav>
-  <p>&copy; 2026 <b>MoyanLab</b> · 墨焱实验室</p>
+  <p>&copy; 2026 <b>MoyanLab</b> · 墨焱实验室 | 构建确定性的数字堡垒</p>
 
-  <!-- ========== 备案信息（工信部 ICP + 公安联网备案）========== -->
-  <div class="beian">
-    <a class="beian-item" href="https://beian.miit.gov.cn/"
-       target="_blank" rel="noopener noreferrer">蜀ICP备2026054057号-1</a>
-    <a class="beian-item"
-       href="http://www.beian.gov.cn/portal/registerSystemInfo?recordcode=510xxxxxxxxxxx"
-       target="_blank" rel="noopener noreferrer">
-      <!-- TODO 上线的必做项：把 510xxxxxxxxxxx 换成你真实的公安联网备案号（12 位纯数字，取自备案号中间那串） -->
-      <img class="beian-badge"
-           src="https://img.alicdn.com/tfs/TB1..50QpXXXXX7XpXXXXXXXXXX-40-40.png"
-           alt="" width="16" height="16" loading="lazy" decoding="async"
-           referrerpolicy="no-referrer" onerror="this.hidden=true">
-      <span>川公网安备 510xxxxxxxxxxx号</span>
-    </a>
-  </div>
-
-  <p class="foot-note">由原生 HTML · CSS · JavaScript 构建 · 零外部依赖</p>
+  <p class="foot-stack">Powered by Vercel &amp; GitHub · Continuous Delivery</p>
 </footer>
 
 <script>
