@@ -191,9 +191,8 @@
 
   var state = {
     day: 1,
-    /* The day's running tally lives here rather than in the session-only
-       `dayStats` object, because a refresh used to wipe the order count and
-       hand the player a fresh 0/5 — and with it another full day of orders. */
+    /* The day's running tally is persisted so a refresh cannot reset the
+       order count and hand the player another full day of orders. */
     dayOrders: 0,
     dayRevenue: 0,
     /* The receipt's own stats are persisted too: without them a refresh on a
@@ -201,6 +200,7 @@
     dayServed: 0,
     dayLost: 0,
     dayStars: 0,
+    dayRecipesFound: 0,
     /* Latched once the revenue-doubling ad has paid out, so refreshing cannot
        farm the same day's takings twice. */
     dayDoubled: false,
@@ -233,6 +233,7 @@
       state.dayServed = Math.max(0, parseInt(d.dayServed, 10) || 0);
       state.dayLost = Math.max(0, parseInt(d.dayLost, 10) || 0);
       state.dayStars = Math.max(0, Number(d.dayStars) || 0);
+      state.dayRecipesFound = Math.max(0, parseInt(d.dayRecipesFound, 10) || 0);
       state.dayDoubled = !!d.dayDoubled;
       state.cash = Math.max(0, Number(d.cash) || 0);
       state.bestRevenue = Math.max(0, Number(d.bestRevenue) || 0);
@@ -276,7 +277,7 @@
       window.localStorage.setItem(SAVE_KEY, JSON.stringify({
         day: state.day, dayOrders: state.dayOrders, dayRevenue: state.dayRevenue,
         dayServed: state.dayServed, dayLost: state.dayLost, dayStars: state.dayStars,
-        dayDoubled: state.dayDoubled,
+        dayRecipesFound: state.dayRecipesFound, dayDoubled: state.dayDoubled,
         cash: state.cash, unlocked: state.unlocked, stock: state.stock, recipes: state.recipes,
         upgrades: state.upgrades, bestRevenue: state.bestRevenue, totalServed: state.totalServed, muted: state.muted
       }));
@@ -290,8 +291,41 @@
    * ======================================================================== */
   function sdkReady() { return !!(window.CrazyGames && window.CrazyGames.SDK); }
 
-  function showRewardedAd(onSuccess) {
-    if (window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.ad) {
+  var rewardedAdPending = false;
+
+  function showRewardedAd(onSuccess, onFailure) {
+    function fail(message) {
+      rewardedAdPending = false;
+      Audio.setMuted(state.muted);
+      if (onFailure) onFailure(message);
+    }
+
+    if (rewardedAdPending) {
+      if (onFailure) onFailure('Another rewarded ad is already running.');
+      return false;
+    }
+    if (!(window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.ad)) {
+      fail('Rewarded ads are unavailable right now.');
+      return false;
+    }
+
+    rewardedAdPending = true;
+    var settled = false;
+    var adGuard = null;
+    function settle(success, message) {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(adGuard);
+      rewardedAdPending = false;
+      Audio.setMuted(state.muted);
+      if (success) {
+        if (onSuccess) onSuccess();
+      } else if (onFailure) {
+        onFailure(message);
+      }
+    }
+
+    try {
       window.CrazyGames.SDK.ad.requestAd("rewarded", {
         /* CrazyGames' terms require the game to be silent for the whole ad
            break, so the master gain is forced to 0 here and put back to the
@@ -301,18 +335,24 @@
           Audio.setMuted(true);
         },
         adFinished: function () {
-          Audio.setMuted(state.muted);
-          if (onSuccess) onSuccess();
+          settle(true);
         },
         adError: function (err) {
           console.warn("Rewarded ad error:", err);
-          Audio.setMuted(state.muted);
-          if (onSuccess) onSuccess();
+          settle(false, 'The ad failed or was skipped. No reward was granted.');
         }
       });
-    } else {
-      if (onSuccess) onSuccess();
+      /* If the SDK swallows the request without firing any callback, the
+         pending flag would otherwise stay set and block every later rewarded
+         ad. The guard only clears the flag; it never pays out a reward. */
+      adGuard = window.setTimeout(function () {
+        settle(false, 'The ad is taking too long. No reward was granted.');
+      }, 180000);
+    } catch (err) {
+      console.warn("Rewarded ad request failed:", err);
+      settle(false, 'The ad could not be started. No reward was granted.');
     }
+    return true;
   }
 
   function showMidgameAd() {
@@ -1716,7 +1756,8 @@
       if (step <= SWIRL_MAX_STEP) gain = step;
     }
     game.lastSwirlAng = ang;
-    game.swirl += gain;
+    var boost = state.upgrades.scraper ? 1.8 : 1;
+    game.swirl += gain * boost;
     game.batterProgress = clamp(game.swirl / SWIRL_FULL, 0, 1);
     return gain;
   }
@@ -1802,9 +1843,8 @@
   /* ===========================================================================
    * 7. GAMEPLAY
    * ======================================================================== */
-  /* Session-only day bookkeeping. Every counter that has to survive a refresh
-     — the order tally, the takings, the receipt's stats — lives on `state`. */
-  var dayStats = { recipesFound: 0 };
+  /* Every day counter that appears on the receipt lives on `state`, so a refresh
+     cannot change the finished day's summary. */
 
   /* Only recipes the stall can actually cook right now. As well as the base
      larder this has to check the pantry, or the game would happily take an order
@@ -1984,7 +2024,7 @@
 
     if (recipe && state.recipes.indexOf(recipe.id) < 0) {
       state.recipes.push(recipe.id);
-      dayStats.recipesFound++;
+      state.dayRecipesFound++;
       Audio.victory();
       sdkHappytime();
       window.setTimeout(function () {
@@ -2059,7 +2099,7 @@
       '<div class="r-sub">NEON ALLEY STALL · DAY ' + state.day + '</div>' +
       '<div class="r-line"><span>Orders completed</span><b>' + state.dayServed + ' / ' + maxOrdersPerDay() + '</b></div>' +
       '<div class="r-line"><span>Customers lost</span><b>' + state.dayLost + '</b></div>' +
-      '<div class="r-line"><span>New recipes found</span><b>' + dayStats.recipesFound + '</b></div>' +
+      '<div class="r-line"><span>New recipes found</span><b>' + state.dayRecipesFound + '</b></div>' +
       '<div class="r-line"><span>Avg. rating</span><b>' + avg.toFixed(2) + ' / 5.00</b></div>' +
       '<div class="r-dash"></div>' +
       '<div class="r-line"><span>Day revenue</span><b>' + fmt(state.dayRevenue) + '</b></div>' +
@@ -2075,7 +2115,6 @@
   function startDay() {
     /* A session restart on the same day keeps the day's tally: resetting it here
        would resurrect the refresh-scumming bug the save fields exist to fix. */
-    dayStats = { recipesFound: 0 };
     save();
     refreshHud();
     sdkGameplayStart();
@@ -2087,6 +2126,7 @@
    * 8. UI
    * ======================================================================== */
   var hintTimer = null;
+  var patienceTone = '';
   function flashHint(text, cls) {
     var el = $('hint-bar');
     el.textContent = text;
@@ -2124,8 +2164,10 @@
     }
     /* stage 3 — flipped, cooked side up */
     var missing = neededKeys().filter(function (k) { return !game.toppings[k]; });
+    var actualKeys = Object.keys(game.toppings);
     var eggOk = game.order.free || game.eggs.length === game.order.eggs;
-    if (missing.length || !eggOk) {
+    var toppingOk = game.order.free || sameSet(game.order.set, actualKeys);
+    if (missing.length || !eggOk || !toppingOk) {
       el.textContent = 'Brush sauce & load toppings, then hit [Fold & Serve]!';
       el.className = 'warn';
     } else {
@@ -2143,7 +2185,7 @@
     $('hud-day').textContent = 'Day ' + state.day;
     $('hud-cash').textContent = fmt(state.cash);
     $('hud-orders').textContent = 'Orders ' + Math.min(state.dayOrders, maxOrdersPerDay()) + '/' + maxOrdersPerDay();
-    $('btn-recipes').textContent = '🎖️ Recipes (' + state.recipes.length + '/16)';
+    $('btn-recipes').textContent = '🎖️ Recipes (' + state.recipes.length + '/' + RECIPES.length + ')';
   }
 
   function updateButtons() {
@@ -2396,11 +2438,22 @@
   function updatePatienceBar() {
     var order = game.order;
     var fill = $('patience-fill');
-    if (!order) { fill.style.width = '100%'; return; }
+    if (!order) {
+      if (fill.style.width !== '100%') fill.style.width = '100%';
+      if (patienceTone !== 'full') {
+        fill.style.background = 'linear-gradient(90deg,#3ddc84,#8ef5b0)';
+        patienceTone = 'full';
+      }
+      return;
+    }
     var r = clamp(order.patience / order.patienceMax, 0, 1);
-    fill.style.width = (r * 100) + '%';
-    if (r > 0.55) fill.style.background = 'linear-gradient(90deg,#3ddc84,#8ef5b0)';
-    else if (r > 0.28) fill.style.background = 'linear-gradient(90deg,#ffb020,#ffd97a)';
+    var width = (Math.round(r * 1000) / 10) + '%';
+    if (fill.style.width !== width) fill.style.width = width;
+    var tone = r > 0.55 ? 'high' : (r > 0.28 ? 'mid' : 'low');
+    if (tone === patienceTone) return;
+    patienceTone = tone;
+    if (tone === 'high') fill.style.background = 'linear-gradient(90deg,#3ddc84,#8ef5b0)';
+    else if (tone === 'mid') fill.style.background = 'linear-gradient(90deg,#ffb020,#ffd97a)';
     else fill.style.background = 'linear-gradient(90deg,#ff3b3b,#ff8080)';
   }
 
@@ -2472,6 +2525,8 @@
       Audio.victory();
       toast('📺 Free delivery: ' + ing.batch + '× ' + ing.name + '  (In stock: ' + state.stock[key] + ')', 'gold');
       save(); refreshHud(); buildShop(); refreshAllShelves();
+    }, function (message) {
+      toast('⚠️ ' + message, 'bad');
     });
   }
 
@@ -2488,8 +2543,8 @@
     }
     $('rec-grid').innerHTML = html;
     $('rec-fill').style.width = (state.recipes.length / RECIPES.length * 100) + '%';
-    $('rec-count').textContent = state.recipes.length + ' / 16';
-    $('btn-recipes').textContent = '🎖️ Recipes (' + state.recipes.length + '/16)';
+    $('rec-count').textContent = state.recipes.length + ' / ' + RECIPES.length;
+    $('btn-recipes').textContent = '🎖️ Recipes (' + state.recipes.length + '/' + RECIPES.length + ')';
   }
 
   function showClue(id) {
@@ -2673,7 +2728,9 @@
         state.cash += 60;
         Audio.coin();
         toast('📺 Thanks! +$60 added to your cash box', 'gold');
-        save(); refreshHud();
+        save(); refreshHud(); buildShop();
+      }, function (message) {
+        toast('⚠️ ' + message, 'bad');
       });
     });
 
@@ -2688,8 +2745,9 @@
       var amt = Math.round(state.dayRevenue);
       /* The latch is the authority, not the disabled attribute: a sandboxed or
          script-driven click must not pay the same day's revenue out twice. */
-      if (amt <= 0 || state.dayDoubled) return;
+      if (amt <= 0 || state.dayDoubled || rewardedAdPending) return;
       showRewardedAd(function () {
+        if (state.dayDoubled) return;
         state.cash += amt;
         /* Latched so a refresh cannot replay the same day's doubling. */
         state.dayDoubled = true;
@@ -2698,6 +2756,8 @@
         save(); refreshHud();
         renderReceipt(state.dayServed > 0 ? state.dayStars / state.dayServed : 0);
         $('btn-ad-double').disabled = true;
+      }, function (message) {
+        toast('⚠️ ' + message, 'bad');
       });
     });
 
@@ -2710,6 +2770,7 @@
       state.dayServed = 0;
       state.dayLost = 0;
       state.dayStars = 0;
+      state.dayRecipesFound = 0;
       state.dayDoubled = false;
       save();
       startDay();
@@ -2730,6 +2791,9 @@
 
     window.addEventListener('resize', function () { fitViewport(); fitCanvas(); });
     window.addEventListener('keydown', function (ev) {
+      var target = ev.target;
+      var interactive = target && target.closest && target.closest('button, input, select, textarea, [contenteditable="true"]');
+      if (interactive || !$('overlay-start').classList.contains('hide') || document.querySelector('.modal.show')) return;
       if (ev.code === 'Space') { ev.preventDefault(); doFlip(); }
       else if (ev.code === 'Enter') { ev.preventDefault(); doServe(); }
     });
@@ -2751,9 +2815,10 @@
     fitViewport();
     fitCanvas();
 
+    $('recipe-total').textContent = RECIPES.length;
     $('start-stats').textContent =
       'Day ' + state.day + '  ·  Cash ' + fmt(state.cash) + '  ·  Recipes ' +
-      state.recipes.length + '/16  ·  Orders served ' + state.totalServed;
+      state.recipes.length + '/' + RECIPES.length + '  ·  Orders served ' + state.totalServed;
 
     sdkInit();
     window.requestAnimationFrame(loop);
