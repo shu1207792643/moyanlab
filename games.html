@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="no-js">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>墨焱独立游戏实验室 · Moyan Indie Game Lab</title>
+<meta name="description" content="纯前端、Canvas、Web Audio 原生小游戏实验室 — 首发《赛博煎饼小摊》，更多独立游戏开发中。">
+<meta name="theme-color" content="#05070e">
+<meta name="color-scheme" content="dark">
+<meta property="og:title" content="墨焱独立游戏实验室 · Moyan Indie Game Lab">
+<meta property="og:description" content="纯 Canvas 原生绘制 · Web Audio 纯代码合成音效">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%2305070e'/%3E%3Cpath d='M12 4.4 19.6 12 12 19.6 4.4 12z' fill='none' stroke='%23ff8a3d' stroke-width='1.3'/%3E%3Cpath d='M12 8.6 15.4 12 12 15.4 8.6 12z' fill='%237c5cff'/%3E%3C/svg%3E">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+:root{
+  --bg:#05070e;--bg-deep:#090a0f;
+  --surface:rgba(255,255,255,.028);--surface-hi:rgba(255,255,255,.048);
+  --border:rgba(255,255,255,.08);--border-hi:rgba(255,255,255,.16);
+  --text:#eef1f7;--text-2:#a7afc1;--muted:#767e94;--dim:#565e73;
+  --amber:#ff8a3d;--amber-soft:#ffb178;--violet:#7c5cff;--indigo:#4d7cff;--green:#3ddc97;
+  --gold:#F3CE85;--warm:#FF984E;
+  --r:22px;--r-sm:14px;--r-xs:11px;--gap:20px;
+  --shell:min(92vw,1520px);--pad:28px;
+  --font:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI Variable Display","Segoe UI",Roboto,"Helvetica Neue","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --mono:"JetBrains Mono","SF Mono",ui-monospace,"Cascadia Code","Roboto Mono",Consolas,"Courier New","PingFang SC",monospace;
+  --ease:cubic-bezier(.22,.61,.36,1);--ease-out:cubic-bezier(.16,1,.3,1);
+}
+html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font);font-size:15px;line-height:1.6;letter-spacing:-.005em;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;overflow-x:hidden;text-rendering:optimizeLegibility}
+img,svg{display:block;max-width:100%}
+a{color:inherit;-webkit-tap-highlight-color:transparent}
+h1,h2,h3,h4,p,ul,li{margin:0;padding:0}
+ul{list-style:none}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+::selection{background:rgba(124,92,255,.34);color:#fff}
+:focus-visible{outline:1.5px solid rgba(255,138,61,.85);outline-offset:3px;border-radius:6px}
+
+.bg{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+.bg-orb{position:absolute;border-radius:50%;filter:blur(92px);will-change:transform;transform:translate3d(0,0,0)}
+.orb-a{width:min(760px,120vw);height:min(760px,120vw);top:-300px;left:-190px;background:radial-gradient(circle at 38% 38%,rgba(255,138,61,.22),rgba(255,152,78,.12) 44%,rgba(124,92,255,.10) 62%,transparent 74%)}
+.orb-b{width:min(820px,130vw);height:min(820px,130vw);right:-300px;bottom:-380px;background:radial-gradient(circle at 50% 50%,rgba(77,124,255,.20),rgba(77,124,255,.08) 46%,transparent 72%)}
+.orb-c{width:min(560px,92vw);height:min(560px,92vw);top:14%;left:52%;background:radial-gradient(circle at 50% 50%,rgba(124,92,255,.16),transparent 68%)}
+.bg-grid{position:absolute;inset:0;background-image:linear-gradient(rgba(255,255,255,.026) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.026) 1px,transparent 1px);background-size:68px 68px;-webkit-mask-image:radial-gradient(ellipse 96% 62% at 50% 0%,#000 0%,transparent 76%);mask-image:radial-gradient(ellipse 96% 62% at 50% 0%,#000 0%,transparent 76%)}
+.bg-vignette{position:absolute;inset:0;background:radial-gradient(ellipse 120% 85% at 50% -10%,transparent 40%,rgba(0,0,0,.42) 100%)}
+.bg-grain{position:fixed;inset:0;z-index:1;pointer-events:none;opacity:.035;mix-blend-mode:overlay;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.86' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='220' height='220' filter='url(%23n)'/%3E%3C/svg%3E")}
+.scroll-bar{position:fixed;top:0;left:0;right:0;height:2px;z-index:60;pointer-events:none}
+.scroll-bar span{display:block;height:100%;width:100%;transform:scaleX(0);transform-origin:0 50%;background:linear-gradient(90deg,var(--amber),var(--violet) 55%,var(--indigo));box-shadow:0 0 14px rgba(124,92,255,.55);transition:transform .12s linear}
+
+.nav-wrap{position:fixed;top:0;left:0;right:0;z-index:50;display:flex;justify-content:center;padding:16px 0;pointer-events:none}
+.nav{pointer-events:auto;width:var(--shell);display:flex;align-items:center;justify-content:space-between;gap:14px;padding:8px 10px 8px 15px;border-radius:999px;border:1px solid var(--border);background:rgba(9,10,15,.58);-webkit-backdrop-filter:blur(18px) saturate(170%);backdrop-filter:blur(18px) saturate(170%);box-shadow:0 10px 34px -14px rgba(0,0,0,.85),inset 0 1px 0 rgba(255,255,255,.055);transition:background .4s var(--ease),border-color .4s var(--ease),box-shadow .4s var(--ease)}
+.nav.is-scrolled{background:rgba(7,8,13,.78);border-color:rgba(255,255,255,.11);box-shadow:0 14px 44px -16px rgba(0,0,0,.95),inset 0 1px 0 rgba(255,255,255,.06)}
+.brand{display:flex;align-items:center;gap:10px;text-decoration:none;min-width:0}
+.brand-mark{flex:0 0 auto;transition:transform .6s var(--ease-out),filter .4s}
+.brand:hover .brand-mark{transform:rotate(90deg) scale(1.06);filter:drop-shadow(0 0 10px rgba(255,138,61,.45))}
+.brand-text{font-size:14px;font-weight:640;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.brand-text .sep{color:var(--dim);margin:0 6px;font-weight:400}
+.brand-text .cn{font-weight:480;color:var(--muted);letter-spacing:.02em}
+.nav-links{display:inline-flex;align-items:center;justify-content:center;gap:8px;flex:1 1 auto;min-width:0}
+.nav-link{position:relative;padding:6px 14px;border-radius:999px;font-size:13px;font-weight:500;color:var(--text-2);text-decoration:none;white-space:nowrap;transition:color .3s var(--ease),background .3s var(--ease)}
+.nav-link:hover{color:var(--text);background:rgba(255,255,255,.055)}
+.nav-link::after{content:"";position:absolute;left:50%;bottom:3px;width:0;height:1.5px;border-radius:2px;background:linear-gradient(90deg,var(--amber),var(--violet));transform:translateX(-50%);transition:width .35s var(--ease)}
+.nav-link:hover::after{width:16px}
+.nav-link.is-active{color:#fff;background:rgba(255,138,61,.09);border:1px solid rgba(255,138,61,.3)}
+.nav-ext{flex:0 0 auto;width:34px;height:34px;border-radius:999px;display:grid;place-items:center;color:var(--text-2);text-decoration:none;border:1px solid var(--border);background:rgba(255,255,255,.025);transition:color .3s,border-color .3s,background .3s,transform .4s var(--ease)}
+.nav-ext:hover{color:#fff;border-color:var(--border-hi);background:rgba(255,255,255,.06);transform:translateY(-1px)}
+.nav-ext svg{width:15px;height:15px}
+
+.page{position:relative;z-index:2;width:var(--shell);margin:0 auto;padding:120px 0 60px}
+.sub-hero{text-align:center;margin-bottom:36px;padding-top:40px}
+.sub-hero h1{font-size:calc(28px + 2vw);font-weight:700;letter-spacing:-.02em;line-height:1.15;background:linear-gradient(135deg,#fff 0%,var(--amber-soft) 36%,var(--violet) 72%,var(--indigo) 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.sub-hero h1 .hero-emoji{display:inline-block;margin-right:10px;-webkit-text-fill-color:initial}
+.sub-hero p{margin-top:14px;font-size:14.5px;color:var(--muted);letter-spacing:.01em}
+.sub-hero .hero-stat{display:inline-flex;align-items:center;gap:6px;margin-top:16px;padding:6px 14px;border-radius:999px;font-family:var(--mono);font-size:11px;color:var(--amber-soft);border:1px solid rgba(255,138,61,.28);background:rgba(255,138,61,.06)}
+
+.card-wide{width:100%;padding:var(--pad) calc(var(--pad) + 14px);border-radius:var(--r);border:1px solid var(--border);background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.012)),rgba(9,10,15,.55);-webkit-backdrop-filter:blur(16px) saturate(150%);backdrop-filter:blur(16px) saturate(150%);box-shadow:0 18px 50px -32px rgba(0,0,0,.85),inset 0 1px 0 rgba(255,255,255,.05)}
+.card-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:18px;padding-bottom:14px;border-bottom:1px solid rgba(255,255,255,.06)}
+.card-title{font-size:18px;font-weight:660;letter-spacing:-.015em}
+.card-title::before{content:"";display:inline-block;width:3px;height:16px;margin-right:10px;vertical-align:-2px;border-radius:2px;background:linear-gradient(180deg,var(--amber),var(--violet));box-shadow:0 0 10px rgba(255,138,61,.45)}
+.card-note{font-size:12.5px;color:var(--dim);font-family:var(--mono);letter-spacing:.03em}
+
+/* ---------- 首发特色大卡片 ---------- */
+.feature-card{
+  position:relative;display:flex;align-items:stretch;gap:28px;overflow:hidden;
+  padding:26px 26px;border-radius:16px;text-decoration:none;color:inherit;
+  border:1px solid rgba(243,206,133,.22);
+  background:
+    radial-gradient(120% 140% at 0% 0%,rgba(255,152,78,.16),transparent 48%),
+    radial-gradient(120% 140% at 100% 100%,rgba(124,92,255,.13),transparent 52%),
+    linear-gradient(135deg,rgba(38,32,24,.72),rgba(20,22,32,.62) 55%,rgba(22,27,34,.6));
+  transition-property:transform,border-color,box-shadow,background;
+  transition-duration:.5s,.32s,.4s,.4s;transition-timing-function:var(--ease);
+}
+html.js .feature-card{opacity:0;transform:translateY(10px)}
+html.js .feature-card.is-in{opacity:1;transform:translateY(0)}
+.feature-card:hover{transform:translateY(-3px);border-color:rgba(243,206,133,.5);box-shadow:0 30px 60px -34px rgba(0,0,0,1),0 0 44px -20px rgba(255,152,78,.45)}
+.fc-visual{
+  flex:0 0 148px;width:148px;height:148px;border-radius:16px;
+  display:grid;place-items:center;font-size:70px;line-height:1;
+  border:1px solid rgba(243,206,133,.28);background:rgba(255,152,78,.08);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.1),0 0 30px -8px rgba(255,152,78,.55);
+  transition:transform .5s var(--ease-out),border-color .3s;
+}
+.feature-card:hover .fc-visual{transform:rotate(-4deg) scale(1.05);border-color:rgba(243,206,133,.55)}
+.fc-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;align-items:flex-start}
+.fc-pill{
+  display:inline-flex;gap:7px;flex-wrap:wrap;
+}
+.fc-pill span{
+  padding:3px 10px;border-radius:999px;font-family:var(--mono);font-size:10px;letter-spacing:.05em;
+  color:var(--amber-soft);border:1px solid rgba(255,138,61,.3);background:rgba(255,138,61,.07);
+}
+.fc-title{margin-top:12px;font-size:25px;font-weight:720;letter-spacing:-.02em;color:var(--text)}
+.fc-sub{margin-top:8px;font-size:13.5px;line-height:1.7;color:var(--muted)}
+.fc-cta{
+  margin-top:18px;display:inline-flex;align-items:center;gap:8px;
+  padding:9px 20px;border-radius:999px;font-size:13px;font-weight:640;color:#1A0F05;
+  background:linear-gradient(180deg,var(--warm),#D36C22);border:1px solid #B05313;
+  box-shadow:0 8px 22px -10px rgba(255,152,78,.65);
+  transition:transform .3s var(--ease),box-shadow .3s;
+}
+.feature-card:hover .fc-cta{transform:translateX(3px);box-shadow:0 10px 28px -10px rgba(255,152,78,.8)}
+.fc-cta .arr{transition:transform .3s var(--ease-out)}
+.feature-card:hover .fc-cta .arr{transform:translateX(3px)}
+
+/* ---------- 敬请期待占位卡 ---------- */
+.game-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:18px}
+@media (max-width:1024px){.game-grid{grid-template-columns:repeat(1,minmax(0,1fr))}}
+.game-slot{
+  position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;
+  padding:34px 22px;border-radius:14px;min-height:180px;text-align:center;
+  border:1px solid rgba(255,255,255,.07);
+  background:repeating-linear-gradient(45deg,rgba(255,255,255,.012) 0,rgba(255,255,255,.012) 8px,transparent 8px,transparent 16px),rgba(12,15,22,.55);
+}
+.game-slot .ghost-emo{
+  width:60px;height:60px;border-radius:14px;display:grid;place-items:center;
+  font-size:28px;border:1px dashed rgba(255,255,255,.14);background:rgba(255,255,255,.02);
+  animation:ghostglow 3.2s var(--ease-out) infinite;
+}
+@keyframes ghostglow{
+  0%,100%{box-shadow:0 0 0 rgba(124,92,255,0);border-color:rgba(255,255,255,.14)}
+  50%{box-shadow:0 0 22px -6px rgba(124,92,255,.4);border-color:rgba(124,92,255,.4)}
+}
+.game-slot .gs-name{font-size:15px;font-weight:640;color:#aab3c6;letter-spacing:-.01em}
+.game-slot .gs-badge{
+  padding:1px 10px;border-radius:999px;font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;
+  color:var(--dim);border:1px solid rgba(255,255,255,.09);background:rgba(255,255,255,.02);
+}
+.game-slot .gs-status{position:absolute;top:14px;right:16px}
+.game-slot .gs-status i{
+  width:7px;height:7px;border-radius:50%;display:inline-block;
+  background:var(--violet);box-shadow:0 0 8px rgba(124,92,255,.85);animation:pulseDots 2.4s var(--ease-out) infinite;
+}
+@keyframes pulseDots{
+  0%{box-shadow:0 0 0 0 rgba(124,92,255,.4),0 0 8px rgba(124,92,255,.8)}
+  70%{box-shadow:0 0 0 7px rgba(124,92,255,0),0 0 8px rgba(124,92,255,.5)}
+  100%{box-shadow:0 0 0 0 rgba(124,92,255,0),0 0 8px rgba(124,92,255,.8)}
+}
+html.js .game-slot{opacity:0;transform:translateY(8px)}
+html.js .game-slot.is-in{opacity:1;transform:translateY(0)}
+
+.site-foot{position:relative;z-index:2;width:var(--shell);margin:40px auto 28px;padding-top:28px;text-align:center}
+.foot-rule{height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.12),transparent);margin-bottom:24px}
+.foot-links{display:flex;justify-content:center;flex-wrap:wrap;gap:4px;margin-bottom:14px}
+.foot-links a{padding:6px 14px;border-radius:999px;font-size:12.5px;color:var(--muted);text-decoration:none;transition:color .3s,background .3s}
+.foot-links a:hover{color:var(--text);background:rgba(255,255,255,.045)}
+.foot-copy{font-size:12px;color:var(--text-2);font-family:var(--mono);letter-spacing:.04em;line-height:1.9}
+.foot-stack{font-size:11.5px;color:var(--dim);font-family:var(--mono);letter-spacing:.04em;line-height:1.9}
+
+@media (max-width:900px){
+  .page{padding-top:100px}
+  .sub-hero{padding-top:20px;margin-bottom:24px}
+  .feature-card{flex-direction:column;align-items:flex-start;gap:16px}
+  .fc-visual{flex:none;width:92px;height:92px;font-size:44px}
+  .fc-title{font-size:21px}
+}
+@media (max-width:640px){
+  .page{width:min(94vw,720px)}
+  .card-head{flex-wrap:wrap}
+  .card-title{font-size:16px}
+  .fc-sub{font-size:12.5px}
+  .game-slot{min-height:158px;padding:28px 18px}
+}
+@media (max-width:480px){
+  .nav-links .nav-link:nth-child(3),.nav-links .nav-link:nth-child(4){display:none}
+  .sub-hero h1{font-size:23px}
+}
+@media (prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  *,*::before,*::after{animation-duration:.001ms!important;transition-duration:.001ms!important}
+  html.js .feature-card,html.js .game-slot{opacity:1;transform:none}
+  .game-slot .ghost-emo,.game-slot .gs-status i{animation:none;box-shadow:none}
+}
+</style>
+<!-- Vercel Web Analytics -->
+<script defer src="https://cdn.vercel-insights.com/v1/script.js"></script>
+</head>
+<body>
+
+<div class="bg" aria-hidden="true"><div class="bg-orb orb-a"></div><div class="bg-orb orb-b"></div><div class="bg-orb orb-c"></div><div class="bg-grid"></div><div class="bg-vignette"></div></div>
+<div class="bg-grain" aria-hidden="true"></div>
+<div class="scroll-bar"><span></span></div>
+
+<nav class="nav-wrap" aria-label="站点导航">
+  <div class="nav">
+    <a class="brand" href="index.html">
+      <svg class="brand-mark" width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M12 4.4 19.6 12 12 19.6 4.4 12z" fill="none" stroke="#ff8a3d" stroke-width="1.3"/>
+        <path d="M12 8.6 15.4 12 12 15.4 8.6 12z" fill="#7c5cff"/>
+      </svg>
+      <span class="brand-text">MoyanLab<span class="sep">·</span><span class="cn">墨焱实验室</span></span>
+    </a>
+    <div class="nav-links">
+      <a class="nav-link" href="index.html">首页</a>
+      <a class="nav-link" href="index.html#articles">技术归档</a>
+      <a class="nav-link" href="ai-hub.html">AI 智库</a>
+      <a class="nav-link" href="tools-hub.html">开发者工具</a>
+      <a class="nav-link is-active" href="games.html">🕹️ 独立游戏</a>
+    </div>
+    <a class="nav-ext" href="https://github.com/shu1207792643" target="_blank" rel="noopener noreferrer" aria-label="GitHub">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.09.68-.22.68-.49 0-.24-.01-.88-.01-1.73-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.62.07-.62 1 .07 1.53 1.05 1.53 1.05.89 1.57 2.34 1.12 2.91.85.09-.66.35-1.12.63-1.38-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05a9.4 9.4 0 0 1 5 0c1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.94-2.34 4.81-4.57 5.06.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81 0 .27.18.59.69.49A10.02 10.02 0 0 0 22 12.25C22 6.58 17.52 2 12 2z"/></svg>
+    </a>
+  </div>
+</nav>
+
+<main class="page">
+  <section class="sub-hero">
+    <h1><span class="hero-emoji">🕹️</span>墨焱独立游戏实验室</h1>
+    <p>Moyan Indie Game Lab · 纯前端 · Canvas · Web Audio 原生小游戏</p>
+    <div class="hero-stat">★ PURE FRONTEND · CANVAS · WEB AUDIO</div>
+  </section>
+
+  <section class="card-wide" aria-label="独立游戏专区">
+    <header class="card-head">
+      <h2 class="card-title">独立游戏实验室</h2>
+      <span class="card-note">首发 1 款 · 3 款开发中</span>
+    </header>
+
+    <!-- 首发特色大卡片 -->
+    <a class="feature-card" href="./game/jianbing.html" aria-label="游玩 赛博煎饼小摊">
+      <span class="fc-visual" aria-hidden="true">🏮</span>
+      <span class="fc-main">
+        <span class="fc-pill">
+          <span>Canvas 物理</span>
+          <span>原生音效</span>
+          <span>模拟经营</span>
+          <span>16 食谱</span>
+        </span>
+        <span class="fc-title">《赛博煎饼小摊》</span>
+        <span class="fc-sub">纯 Canvas 原生绘制 + Web Audio 纯代码合成音效，收银、进货、翻面、出餐，经营一家属于你的深夜煎饼摊。</span>
+        <span class="fc-cta">开始出摊 <span class="arr">→</span></span>
+      </span>
+    </a>
+
+    <!-- 敬请期待：开发中占位 -->
+    <div class="game-grid">
+      <div class="game-slot">
+        <span class="gs-status" aria-hidden="true"><i></i></span>
+        <span class="ghost-emo" aria-hidden="true">🛰️</span>
+        <span class="gs-name">星际矿工 Rush</span>
+        <span class="gs-badge">In Development · 敬请期待</span>
+      </div>
+      <div class="game-slot">
+        <span class="gs-status" aria-hidden="true"><i></i></span>
+        <span class="ghost-emo" aria-hidden="true">🐟</span>
+        <span class="gs-name">深海信号塔</span>
+        <span class="gs-badge">In Development · 敬请期待</span>
+      </div>
+      <div class="game-slot">
+        <span class="gs-status" aria-hidden="true"><i></i></span>
+        <span class="ghost-emo" aria-hidden="true">⚙️</span>
+        <span class="gs-name">下一款作品</span>
+        <span class="gs-badge">In Development · 敬请期待</span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-foot">
+  <div class="foot-rule" aria-hidden="true"></div>
+  <nav class="foot-links" aria-label="页脚导航">
+    <a href="index.html">首页</a>
+    <a href="index.html#articles">技术归档</a>
+    <a href="ai-hub.html">AI 智库</a>
+    <a href="tools-hub.html">开发者工具</a>
+    <a href="games.html">独立游戏</a>
+    <a href="https://moyanlab.vercel.app" target="_blank" rel="noopener">RSS</a>
+  </nav>
+  <p class="foot-copy">&copy; 2026 <b>MoyanLab</b> · 墨焱实验室 | 构建确定性的数字堡垒</p>
+  <p class="foot-stack">Powered by Vercel &amp; GitHub · Continuous Delivery</p>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+  var root = document.documentElement;
+  root.classList.add('js');
+  var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var nav = document.querySelector('.nav');
+  var bar = document.querySelector('.scroll-bar span');
+  function onScroll() {
+    var y = window.scrollY || document.documentElement.scrollTop;
+    if (nav) nav.classList.toggle('is-scrolled', y > 24);
+    if (bar) {
+      var h = document.documentElement;
+      var pct = h.scrollTop / (h.scrollHeight - h.clientHeight || 1);
+      bar.style.transform = 'scaleX(' + Math.min(1, Math.max(0, pct)) + ')';
+    }
+  }
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+
+  var cards = document.querySelectorAll('.feature-card, .game-slot');
+  var i = 0;
+  cards.forEach ? cards.forEach : (cards = Array.prototype.slice.call(cards));
+  [].forEach.call(cards, function (c) {
+    setTimeout(function () { c.classList.add('is-in'); }, 60 + i * 90);
+    i++;
+  });
+})();
+</script>
+</body>
+</html>
