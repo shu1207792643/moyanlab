@@ -4,8 +4,20 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Cyber Purifier: Protocol Zero</title>
-<!-- CrazyGames SDK v3 官方脚本 -->
-<script src="https://sdk.crazygames.com/crazygames-sdk-v3.js"></script>
+<!-- CrazyGames SDK v3：仅在官方平台域名下动态加载。
+     本地 file:// 与自托管（moyanlab.com / *.vercel.app）不发起任何外部请求，
+     避免控制台出现脚本加载失败与 SDK 初始化报错。 -->
+<script>
+(function () {
+  var host = location.hostname || '';
+  window.__CG_ON_PLATFORM__ = /(^|\.)crazygames\.com$/i.test(host);
+  if (!window.__CG_ON_PLATFORM__) return;
+  var script = document.createElement('script');
+  script.src = 'https://sdk.crazygames.com/crazygames-sdk-v3.js';
+  script.async = true;
+  document.head.appendChild(script);
+})();
+</script>
 <style>
 :root {
   color-scheme: dark;
@@ -103,16 +115,20 @@ class CrazyGamesAdapter {
     this.audio = audio;
     this.busy = false;
     this.lastMidgame = 0;
+    // 由页面顶部的环境探测结果决定：只有 CrazyGames 官方域名才接线上广告，
+    // 本地 file:// 与自托管站点一律走本地模拟。
+    this.onPlatform = window.__CG_ON_PLATFORM__ === true;
     this.init();
   }
   async init() {
+    if (!this.onPlatform) return;
     try {
       if (window.CrazyGames && window.CrazyGames.SDK) {
         await window.CrazyGames.SDK.init();
       }
     } catch (e) {}
   }
-  get sdk() { return window.CrazyGames && window.CrazyGames.SDK ? window.CrazyGames.SDK : null; }
+  get sdk() { return this.onPlatform && window.CrazyGames && window.CrazyGames.SDK ? window.CrazyGames.SDK : null; }
   gameplayStart() { try { this.sdk?.game?.gameplayStart?.(); } catch (e) {} }
   gameplayStop() { try { this.sdk?.game?.gameplayStop?.(); } catch (e) {} }
   happytime() { try { this.sdk?.game?.happytime?.(); } catch (e) {} }
@@ -134,14 +150,17 @@ class CrazyGamesAdapter {
     };
 
     const sdk = this.sdk;
-    if (sdk?.ad?.requestAd) {
-      try {
-        sdk.ad.requestAd(type, { adStarted: start, adFinished: finish, adError: fail });
-      } catch (e) { fail(); }
-    } else {
+    if (!sdk?.ad?.requestAd) {
+      // 静默降级：非官方平台（本地 / 自托管）或 SDK 尚未就绪时，
+      // 用 1 秒本地模拟成功回调代替线上广告，不发任何外部请求。
+      // 复活 / 刷新卡牌 / 双倍芯片 / 每日补给 的奖励照常发放。
       start();
-      setTimeout(finish, 800);
+      setTimeout(finish, 1000);
+      return true;
     }
+    try {
+      sdk.ad.requestAd(type, { adStarted: start, adFinished: finish, adError: fail });
+    } catch (e) { fail(); }
     return true;
   }
   rewarded(onReward, onFail) { return this.request('rewarded', onReward, onFail); }

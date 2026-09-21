@@ -110,6 +110,21 @@ html.js .feature-card.is-in{opacity:1;transform:translateY(0)}
   padding:3px 10px;border-radius:999px;font-family:var(--mono);font-size:10px;letter-spacing:.05em;
   color:var(--amber-soft);border:1px solid rgba(255,138,61,.3);background:rgba(255,138,61,.07);
 }
+.fc-status{
+  display:inline-flex;align-items:center;gap:7px;margin-bottom:11px;
+  padding:4px 12px;border-radius:999px;font-family:var(--mono);font-size:9.5px;letter-spacing:.07em;
+  color:#ffe0b8;border:1px solid rgba(243,206,133,.45);background:rgba(243,206,133,.1);
+  box-shadow:0 0 18px -8px rgba(243,206,133,.75);
+}
+.fc-status i{
+  flex:0 0 auto;width:6px;height:6px;border-radius:50%;background:var(--gold);
+  box-shadow:0 0 8px rgba(243,206,133,.9);animation:pulseGold 2.2s var(--ease-out) infinite;
+}
+@keyframes pulseGold{
+  0%{box-shadow:0 0 0 0 rgba(243,206,133,.45),0 0 8px rgba(243,206,133,.85)}
+  70%{box-shadow:0 0 0 6px rgba(243,206,133,0),0 0 8px rgba(243,206,133,.45)}
+  100%{box-shadow:0 0 0 0 rgba(243,206,133,0),0 0 8px rgba(243,206,133,.85)}
+}
 .fc-title{margin-top:12px;font-size:25px;font-weight:720;letter-spacing:-.02em;color:var(--text)}
 .fc-sub{margin-top:8px;font-size:13.5px;line-height:1.7;color:var(--muted)}
 .fc-cta{
@@ -122,6 +137,10 @@ html.js .feature-card.is-in{opacity:1;transform:translateY(0)}
 .feature-card:hover .fc-cta{transform:translateX(3px);box-shadow:0 10px 28px -10px rgba(255,152,78,.8)}
 .fc-cta .arr{transition:transform .3s var(--ease-out)}
 .feature-card:hover .fc-cta .arr{transform:translateX(3px)}
+
+/* ---------- 双游戏展台网格 ---------- */
+.feature-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:1024px){.feature-grid{grid-template-columns:minmax(0,1fr)}}
 
 /* ---------- 敬请期待占位卡 ---------- */
 .game-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:18px}
@@ -190,6 +209,7 @@ html.js .game-slot.is-in{opacity:1;transform:translateY(0)}
   *,*::before,*::after{animation-duration:.001ms!important;transition-duration:.001ms!important}
   html.js .feature-card,html.js .game-slot{opacity:1;transform:none}
   .game-slot .ghost-emo,.game-slot .gs-status i{animation:none;box-shadow:none}
+  .fc-status i{animation:none}
 }
 </style>
 <!-- Vercel Web Analytics -->
@@ -233,24 +253,46 @@ html.js .game-slot.is-in{opacity:1;transform:translateY(0)}
   <section class="card-wide" aria-label="独立游戏专区">
     <header class="card-head">
       <h2 class="card-title">独立游戏实验室</h2>
-      <span class="card-note">首发 1 款 · 3 款开发中</span>
+      <span class="card-note">2 款送审中 · 3 款开发中</span>
     </header>
 
-    <!-- 首发特色大卡片 -->
-    <a class="feature-card" href="./game/jianbing.html" aria-label="游玩 赛博煎饼小摊">
-      <span class="fc-visual" aria-hidden="true">🏮</span>
-      <span class="fc-main">
-        <span class="fc-pill">
-          <span>Canvas 物理</span>
-          <span>原生音效</span>
-          <span>模拟经营</span>
-          <span>16 食谱</span>
+    <!-- 网格展台：已进入送审流程的作品 -->
+    <div class="feature-grid">
+
+      <!-- 01 · 赛博煎饼小摊（新版） -->
+      <a class="feature-card" href="./cyber-crepe-v2/index.html" aria-label="游玩 Cyber Crepe Master 赛博煎饼小摊 新版">
+        <span class="fc-visual" aria-hidden="true">🏮</span>
+        <span class="fc-main">
+          <span class="fc-status"><i aria-hidden="true"></i>Status: Awaiting Review (CrazyGames)</span>
+          <span class="fc-pill">
+            <span>Canvas 物理</span>
+            <span>原生音效</span>
+            <span>模拟经营</span>
+            <span>16 食谱</span>
+          </span>
+          <span class="fc-title">《赛博煎饼小摊》</span>
+          <span class="fc-sub">纯 Canvas 原生绘制 + Web Audio 纯代码合成音效，收银、进货、翻面、出餐，经营一家属于你的深夜煎饼摊。</span>
+          <span class="fc-cta">开始出摊 <span class="arr">→</span></span>
         </span>
-        <span class="fc-title">《赛博煎饼小摊》</span>
-        <span class="fc-sub">纯 Canvas 原生绘制 + Web Audio 纯代码合成音效，收银、进货、翻面、出餐，经营一家属于你的深夜煎饼摊。</span>
-        <span class="fc-cta">开始出摊 <span class="arr">→</span></span>
-      </span>
-    </a>
+      </a>
+
+      <!-- 02 · Cyber Purifier -->
+      <a class="feature-card" href="./cyber-purifier/index.html" aria-label="游玩 Cyber Purifier: Protocol Zero">
+        <span class="fc-visual" aria-hidden="true">🚀</span>
+        <span class="fc-main">
+          <span class="fc-status"><i aria-hidden="true"></i>Status: Awaiting Review (CrazyGames)</span>
+          <span class="fc-pill">
+            <span>Roguelite</span>
+            <span>生存割草</span>
+            <span>Boss 连战</span>
+          </span>
+          <span class="fc-title">Cyber Purifier: Protocol Zero</span>
+          <span class="fc-sub">高燃赛博朋克 Roguelite 生存割草射击，从杂兵一路割到 Boss 连战。</span>
+          <span class="fc-cta">进入战场 <span class="arr">→</span></span>
+        </span>
+      </a>
+
+    </div>
 
     <!-- 敬请期待：开发中占位 -->
     <div class="game-grid">

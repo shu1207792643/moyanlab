@@ -289,24 +289,32 @@
   /* ===========================================================================
    * 3. CRAZYGAMES SDK v3
    * ======================================================================== */
-  function sdkReady() { return !!(window.CrazyGames && window.CrazyGames.SDK); }
+  /* 环境探测：只有 CrazyGames 官方域名才接线上广告。本地 file:// 与自托管
+     （moyanlab.com / *.vercel.app）一律静默降级，不向 CDN 拉取 SDK，
+     也不会在控制台留下任何报错。 */
+  var CG_ON_PLATFORM = /(^|\.)crazygames\.com$/i.test(window.location.hostname || '');
+  function sdkReady() { return CG_ON_PLATFORM && !!(window.CrazyGames && window.CrazyGames.SDK); }
 
   var rewardedAdPending = false;
 
   function showRewardedAd(onSuccess, onFailure) {
-    function fail(message) {
-      rewardedAdPending = false;
-      Audio.setMuted(state.muted);
-      if (onFailure) onFailure(message);
-    }
-
     if (rewardedAdPending) {
       if (onFailure) onFailure('Another rewarded ad is already running.');
       return false;
     }
-    if (!(window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.ad)) {
-      fail('Rewarded ads are unavailable right now.');
-      return false;
+
+    /* 非官方平台（本地 file:// / Vercel 自托管），或线上广告接口尚未就绪：
+       用 1 秒本地模拟成功代替线上广告，不发任何外部请求。复活、双倍现金、
+       补货等奖励照常发放，保证在博客上也能顺手玩通、不被广告卡住。 */
+    if (!sdkReady() || !window.CrazyGames.SDK.ad) {
+      rewardedAdPending = true;
+      Audio.setMuted(true);
+      window.setTimeout(function () {
+        rewardedAdPending = false;
+        Audio.setMuted(state.muted);
+        if (onSuccess) onSuccess();
+      }, 1000);
+      return true;
     }
 
     rewardedAdPending = true;
@@ -356,7 +364,7 @@
   }
 
   function showMidgameAd() {
-    if (window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.ad) {
+    if (sdkReady() && window.CrazyGames.SDK.ad) {
       window.CrazyGames.SDK.ad.requestAd("midgame", {
         adStarted: function () {
           console.log("Midgame ad started");
