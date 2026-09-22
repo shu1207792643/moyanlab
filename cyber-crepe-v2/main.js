@@ -22,6 +22,30 @@
     return true;
   };
 
+  /* Central tuning table — every previously-scattered magic number lives here
+     so gameplay timing and rewards can be adjusted from one place. */
+  var TUNE = {
+    AD_CASH: 60,              /* rewarded-ad cash grant (synced into DOM text) */
+    FOLD_MS: 1150,            /* fold animation duration (ms of foldT progress) */
+    FLIP_MS: 780,
+    NEXT_CUST_MS: 780,
+    GAVEUP_MS: 620,
+    RECIPE_TOAST_MS: 620,
+    PATIENCE_MIN: 46,
+    PATIENCE_MAX: 92,
+    SEAR_INTERVAL: 0.22,
+    SEAR_MAX: 90,
+    HINT_TICK: 0.12,
+    MAX_PARTICLES: 120,
+    MIDGAME_COOLDOWN_MS: 90000,
+    AD_GUARD_MS: 180000,
+    MIDGAME_TIMEOUT_MS: 180000,
+    SERVE_TIP_FREE: 0.18,
+    SERVE_TIP_PERFECT: 0.22,
+    SERVE_WRONG: 0.45,
+    SAVE_DEBOUNCE_MS: 300
+  };
+
   /* ===========================================================================
    * 1. GAME DATA
    * ======================================================================== */
@@ -214,6 +238,18 @@
     muted: false
   };
 
+  /* Debounced persistence: rapid stock clicks no longer sync-write localStorage
+     on every tap. Settlement points still call saveNow() for an immediate flush. */
+  var saveTimer = null;
+  function saveNow() {
+    if (saveTimer) { window.clearTimeout(saveTimer); saveTimer = null; }
+    save();
+  }
+  function saveDebounced() {
+    if (saveTimer) window.clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(function () { saveTimer = null; save(); }, TUNE.SAVE_DEBOUNCE_MS);
+  }
+
   function defaultUnlocked() {
     return ING_KEYS.filter(function (k) { return INGREDIENTS[k].unlocked; });
   }
@@ -289,13 +325,33 @@
   /* ===========================================================================
    * 3. CRAZYGAMES SDK v3
    * ======================================================================== */
-  /* 环境探测：只有 CrazyGames 官方域名才接线上广告。本地 file:// 与自托管
-     （moyanlab.com / *.vercel.app）一律静默降级，不向 CDN 拉取 SDK，
-     也不会在控制台留下任何报错。 */
-  var CG_ON_PLATFORM = /(^|\.)crazygames\.com$/i.test(window.location.hostname || '');
+  /* Single source of truth: index.html computes __CG_ON_PLATFORM__ once when
+     injecting the SDK, and main.js only reads that flag — never re-derives it. */
+  var CG_ON_PLATFORM = !!window.__CG_ON_PLATFORM__;
   function sdkReady() { return CG_ON_PLATFORM && !!(window.CrazyGames && window.CrazyGames.SDK); }
 
   var rewardedAdPending = false;
+  var midgameAdPending = false;
+  var lastMidgameAt = -Infinity;
+  var sdkInitStarted = false;
+
+  /* Ensure SDK.init() runs exactly once as soon as the async script finishes
+     loading — previously a race left init permanently skipped on the platform. */
+  function sdkInit() {
+    if (sdkInitStarted || !CG_ON_PLATFORM) return;
+    if (!window.__cgSdkLoaded__ || !sdkReady()) {
+      window.__cgSdkOnLoaded = function () {
+        window.__cgSdkOnLoaded = null;
+        sdkInit();
+      };
+      return;
+    }
+    sdkInitStarted = true;
+    try {
+      var p = window.CrazyGames.SDK.init();
+      if (p && typeof p.then === 'function') p.catch(function () {});
+    } catch (e) { /* init failure is non-fatal; ads simply no-op */ }
+  }
 
   function showRewardedAd(onSuccess, onFailure) {
     if (rewardedAdPending) {
@@ -303,10 +359,10 @@
       return false;
     }
 
-    /* 非官方平台（本地 file:// / Vercel 自托管），或线上广告接口尚未就绪：
-       用 1 秒本地模拟成功代替线上广告，不发任何外部请求。复活、双倍现金、
-       补货等奖励照常发放，保证在博客上也能顺手玩通、不被广告卡住。 */
-    if (!sdkReady() || !window.CrazyGames.SDK.ad) {
+    /* Only a non-platform host (file:// / Vercel self-host) may simulate an ad.
+       On CrazyGames, if the SDK is not ready yet we must NEVER pay out —
+       otherwise rewards are granted without a real ad (policy violation). */
+    if (!CG_ON_PLATFORM) {
       rewardedAdPending = true;
       Audio.setMuted(true);
       window.setTimeout(function () {
@@ -315,6 +371,10 @@
         if (onSuccess) onSuccess();
       }, 1000);
       return true;
+    }
+    if (!sdkReady() || !window.CrazyGames.SDK.ad) {
+      if (onFailure) onFailure('The ad system is still loading. Please try again in a moment.');
+      return false;
     }
 
     rewardedAdPending = true;
@@ -326,6 +386,7 @@
       window.clearTimeout(adGuard);
       rewardedAdPending = false;
       Audio.setMuted(state.muted);
+      resumeGameplayAfterAd();
       if (success) {
         if (onSuccess) onSuccess();
       } else if (onFailure) {
@@ -339,47 +400,54 @@
            break, so the master gain is forced to 0 here and put back to the
            player's own preference on every exit path. */
         adStarted: function () {
-          console.log("Rewarded ad started");
           Audio.setMuted(true);
+          sdkGameplayStop();
         },
-        adFinished: function () {
-          settle(true);
-        },
+        adFinished: function () { settle(true); },
         adError: function (err) {
-          console.warn("Rewarded ad error:", err);
           settle(false, 'The ad failed or was skipped. No reward was granted.');
         }
       });
-      /* If the SDK swallows the request without firing any callback, the
-         pending flag would otherwise stay set and block every later rewarded
-         ad. The guard only clears the flag; it never pays out a reward. */
       adGuard = window.setTimeout(function () {
         settle(false, 'The ad is taking too long. No reward was granted.');
-      }, 180000);
+      }, TUNE.AD_GUARD_MS);
     } catch (err) {
-      console.warn("Rewarded ad request failed:", err);
       settle(false, 'The ad could not be started. No reward was granted.');
     }
     return true;
   }
 
   function showMidgameAd() {
-    if (sdkReady() && window.CrazyGames.SDK.ad) {
+    if (!CG_ON_PLATFORM) return;
+    if (midgameAdPending) return;
+    var now = Date.now();
+    if (now - lastMidgameAt < TUNE.MIDGAME_COOLDOWN_MS) return;
+    if (!sdkReady() || !window.CrazyGames.SDK.ad) return;
+
+    midgameAdPending = true;
+    lastMidgameAt = now;
+    var settled = false;
+    var guard = null;
+    function done() {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(guard);
+      midgameAdPending = false;
+      Audio.setMuted(state.muted);
+      resumeGameplayAfterAd();
+    }
+    try {
       window.CrazyGames.SDK.ad.requestAd("midgame", {
         adStarted: function () {
-          console.log("Midgame ad started");
           Audio.setMuted(true);
+          sdkGameplayStop();
         },
-        adFinished: function () {
-          console.log("Midgame ad finished");
-          Audio.setMuted(state.muted);
-        },
-        adError: function (err) {
-          console.warn("Midgame ad error:", err);
-          Audio.setMuted(state.muted);
-        }
+        adFinished: done,
+        adError: done
       });
-    }
+      /* SDK that never calls back would otherwise mute the game forever. */
+      guard = window.setTimeout(done, TUNE.MIDGAME_TIMEOUT_MS);
+    } catch (e) { done(); }
   }
 
   function sdkGameplayStart() {
@@ -391,13 +459,6 @@
   function sdkHappytime() {
     try { if (sdkReady() && window.CrazyGames.SDK.game) window.CrazyGames.SDK.game.happytime(); } catch (e) {}
   }
-  function sdkInit() {
-    if (!sdkReady()) return;
-    try {
-      var p = window.CrazyGames.SDK.init();
-      if (p && typeof p.then === 'function') p.catch(function (e) { console.warn('SDK init failed', e); });
-    } catch (e) { console.warn('SDK init failed', e); }
-  }
 
   /* ===========================================================================
    * 4. WEB AUDIO ASMR ENGINE (zero external assets)
@@ -405,7 +466,7 @@
   var Audio = (function () {
     var ctx = null, master = null, noiseBuf = null;
     var sizzleSrc = null, sizzleGain = null, sizzleFilter = null, sizzleLfo = null, sizzleLfoGain = null;
-    var bgmTimer = null, bgmStep = 0, muted = false;
+    var bgmTimer = null, bgmStep = 0, bgmNextT = 0, muted = false;
 
     var STEP = 0.29;
     var MEL = [
@@ -572,9 +633,9 @@
       voice({ freq: 1567.98, dur: 0.6, vol: 0.08, type: 'sine', at: t + 0.10, lp: 7000 });
     }
 
-    function playBgmStep() {
+    function playBgmStep(atTime) {
       if (!ctx || muted) return;
-      var t = ctx.currentTime + 0.06;
+      var t = atTime != null ? atTime : ctx.currentTime + 0.06;
       var m = MEL[bgmStep % MEL.length];
       var b = BASS[bgmStep % BASS.length];
       if (m) {
@@ -586,26 +647,54 @@
       bgmStep++;
     }
 
+    /* Look-ahead scheduler: a 100ms interval queues every step that falls
+       inside the next 300ms of audio-clock time, so background-tab throttling
+       cannot chop the melody into glitchy stutters (plain setInterval could). */
+    function bgmTick() {
+      if (!ctx || muted) return;
+      while (bgmNextT < ctx.currentTime + 0.3) {
+        if (bgmNextT < ctx.currentTime) bgmNextT = ctx.currentTime + 0.02;
+        playBgmStep(bgmNextT);
+        bgmNextT += STEP;
+      }
+    }
+
     function startBgm() {
       if (!ensure()) return;
       resume();
       if (bgmTimer) return;
       bgmStep = 0;
-      bgmTimer = window.setInterval(playBgmStep, STEP * 1000);
+      bgmNextT = ctx.currentTime + 0.08;
+      bgmTimer = window.setInterval(bgmTick, 100);
     }
     function stopBgm() { if (bgmTimer) { window.clearInterval(bgmTimer); bgmTimer = null; } }
     function setMuted(m) {
       muted = !!m;
-      if (master) master.gain.value = muted ? 0 : 0.85;
+      if (master) {
+        /* Ramp instead of a raw assignment: a 0 → 0.85 step clicks audibly,
+           which was most noticeable when restoring volume after an ad. */
+        try {
+          var t = ctx.currentTime;
+          master.gain.cancelScheduledValues(t);
+          master.gain.setValueAtTime(master.gain.value, t);
+          master.gain.setTargetAtTime(muted ? 0 : 0.85, t, muted ? 0.012 : 0.03);
+        } catch (e) {
+          master.gain.value = muted ? 0 : 0.85;
+        }
+      }
       if (!muted) resume();
     }
+    function suspend() {
+      if (ctx && ctx.state === 'running') { try { ctx.suspend(); } catch (e) {} }
+    }
+    function resumeCtx() { resume(); }
 
     return {
       unlock: unlock, startSizzle: startSizzle, stopSizzle: stopSizzle,
       crackEgg: crackEgg, flipThud: flipThud, spreadScrape: spreadScrape,
       coin: coin, victory: victory, deny: deny, swoosh: swoosh, chime: chime,
       startBgm: startBgm, stopBgm: stopBgm, setMuted: setMuted,
-      isMuted: function () { return muted; }
+      suspend: suspend, resumeCtx: resumeCtx
     };
   })();
 
@@ -642,9 +731,48 @@
   var maxR = 0;
   var panRot = 0;
   var particles = [];
+  var MAX_PARTICLES = TUNE.MAX_PARTICLES;
+
+  /* Pre-rendered steam puff — one radial-gradient sprite built once, then
+     blitted with globalAlpha. Replacing per-particle createRadialGradient
+     removes the main per-frame allocation in the particle pass. */
+  var steamSprite = null;
+  function getSteamSprite() {
+    if (steamSprite) return steamSprite;
+    var s = document.createElement('canvas');
+    s.width = s.height = 64;
+    var sc = s.getContext('2d');
+    var g = sc.createRadialGradient(32, 32, 0, 32, 32, 32);
+    g.addColorStop(0, 'rgba(255,246,232,1)');
+    g.addColorStop(0.45, 'rgba(255,244,224,0.55)');
+    g.addColorStop(1, 'rgba(255,240,220,0)');
+    sc.fillStyle = g;
+    sc.fillRect(0, 0, 64, 64);
+    steamSprite = s;
+    return s;
+  }
+
+  /* Deterministic blister / mottle unit positions for the crepe surface.
+     Precomputed once (they never change) instead of ~330 trig calls per frame. */
+  var BLISTERS = (function () {
+    var out = [];
+    for (var b = 0; b < 54; b++) {
+      out.push({ a: (b * 2.399) % TAU, d: ((b * 0.618) % 1) * 0.9 + 0.05, r1: 2.4 + (b % 4), r2: 1.4 + (b % 3) });
+    }
+    return out;
+  })();
+  var MOTTLES = (function () {
+    var out = [];
+    for (var m = 0; m < 30; m++) {
+      out.push({ a: (m * 2.399) % TAU, d: ((m * 0.613) % 1) * 0.86 + 0.06, rx: 5 + (m % 4) * 2, ry: 3.4 + (m % 3) * 1.6 });
+    }
+    return out;
+  })();
 
   var game = {
     phase: 'idle',      /* idle | cooking | flipping | folding | locked */
+    paused: false,      /* modal / ad / tab-hidden — freezes logic, still renders */
+    started: false,     /* false until "Open the Stall" — no rAF work before that */
     coverage: 0,
     eggs: [],
     toppings: {},
@@ -659,7 +787,6 @@
     dragging: false,
     inPan: false,
     px: CX, py: CY,
-    pvx: 0, pvy: 0,
     lastX: CX, lastY: CY,
     time: 0,
     glow: 0,
@@ -673,8 +800,62 @@
     coinPaid: false
   };
 
+  /* Fold-animation offscreen cache: the crepe body is drawn once when folding
+     starts, then blitted 3× per frame (centre / left wing / right wing) instead
+     of re-running the full topping pipeline every pass. */
+  var foldCache = null;
+  function buildFoldCache() {
+    var side = Math.ceil(MAX_R * 2 + 48);
+    var c = document.createElement('canvas');
+    c.width = side; c.height = side;
+    var cc = c.getContext('2d');
+    /* Swap the module-level ctx the draw helpers close over, render the crepe
+       once into the offscreen buffer, then restore. */
+    var prev = ctx;
+    ctx = cc;
+    try {
+      drawCrepeBody(side / 2, side / 2);
+    } finally {
+      ctx = prev;
+    }
+    foldCache = c;
+    return c;
+  }
+  function clearFoldCache() { foldCache = null; }
+  function drawFoldCached(cx, cy) {
+    if (!foldCache) { drawCrepeBody(cx, cy); return; }
+    var half = foldCache.width / 2;
+    ctx.drawImage(foldCache, cx - half, cy - half);
+  }
+
+  /* Pause / resume used by modals, ads and tab visibility. Keeps SDK
+     gameplayStart/Stop paired with the real "player is playing" windows. */
+  var gameplayRunning = false;
+  function pauseGameplay(reason) {
+    if (game.paused) return;
+    game.paused = true;
+    Audio.stopSizzle();
+    sdkGameplayStop();
+    gameplayRunning = false;
+  }
+  function resumeGameplay(reason) {
+    if (!game.paused) return;
+    /* Never resume while a modal is still open. */
+    if (document.querySelector('.modal.show')) return;
+    if (rewardedAdPending || midgameAdPending) return;
+    game.paused = false;
+    if (game.started && game.phase !== 'locked') {
+      sdkGameplayStart();
+      gameplayRunning = true;
+    }
+  }
+  function resumeGameplayAfterAd() {
+    if (rewardedAdPending || midgameAdPending) return;
+    resumeGameplay('ad');
+  }
+
   function resetPan() {
-    blob = new Float32Array(ANGLES);
+    blob.fill(0);
     maxR = 0;
     game.coverage = 0;
     game.eggs = [];
@@ -697,6 +878,7 @@
     game.serveResult = null;
     game.coinPaid = false;
     particles.length = 0;
+    clearFoldCache();
     Audio.stopSizzle();
     refreshShelfMarks();
     applyShelfStage(true);
@@ -704,23 +886,27 @@
   }
 
   /* --- particle helpers -------------------------------------------------- */
+  function pushParticle(p) {
+    if (particles.length >= MAX_PARTICLES) particles.shift();
+    particles.push(p);
+  }
   function spawnSteam(x, y, strength) {
-    particles.push({
+    pushParticle({
       t: 'steam', x: x, y: y, vx: rand(-12, 12), vy: rand(-42, -20) * strength,
       r: rand(6, 16), life: 0, max: rand(1.1, 2.2), seed: rand(0, 6.28)
     });
   }
   function spawnSpark(x, y) {
-    particles.push({
+    pushParticle({
       t: 'spark', x: x, y: y, vx: rand(-26, 26), vy: rand(-46, -14),
       r: rand(0.8, 2.1), life: 0, max: rand(0.3, 0.7)
     });
   }
   function spawnCoin(x, y, text) {
-    particles.push({ t: 'coin', x: x, y: y, vx: rand(-18, 18), vy: rand(-76, -46), life: 0, max: rand(1.3, 1.9), text: text, r: rand(8, 12) });
+    pushParticle({ t: 'coin', x: x, y: y, vx: rand(-18, 18), vy: rand(-76, -46), life: 0, max: rand(1.3, 1.9), text: text, r: rand(8, 12) });
   }
   function spawnCrumb(x, y, color) {
-    particles.push({ t: 'crumb', x: x, y: y, vx: rand(-50, 50), vy: rand(-70, -20), r: rand(1.2, 2.8), life: 0, max: rand(0.5, 1.0), color: color });
+    pushParticle({ t: 'crumb', x: x, y: y, vx: rand(-50, 50), vy: rand(-70, -20), r: rand(1.2, 2.8), life: 0, max: rand(0.5, 1.0), color: color });
   }
 
   function updateParticles(dt) {
@@ -741,17 +927,15 @@
   }
 
   function drawParticles() {
+    var sprite = getSteamSprite();
     for (var i = 0; i < particles.length; i++) {
       var p = particles[i], k = p.life / p.max;
       if (p.t === 'steam') {
         var a = (1 - k) * 0.26 * Math.min(1, k * 6);
-        var g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r);
-        g.addColorStop(0, 'rgba(255,246,232,' + a + ')');
-        g.addColorStop(1, 'rgba(255,240,220,0)');
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.r, 0, TAU);
-        ctx.fillStyle = g;
-        ctx.fill();
+        var d = p.r * 2;
+        ctx.globalAlpha = a;
+        ctx.drawImage(sprite, p.x - p.r, p.y - p.r, d, d);
+        ctx.globalAlpha = 1;
       } else if (p.t === 'spark') {
         ctx.globalAlpha = (1 - k) * 0.85;
         ctx.fillStyle = k < 0.4 ? '#fff0b8' : '#ff9a3c';
@@ -792,6 +976,60 @@
   }
 
   /* --- griddle ----------------------------------------------------------- */
+  /* Cached background gradient — colours never change, so build once. */
+  var bgGrad = null;
+  function getBgGrad() {
+    if (!bgGrad) {
+      bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+      bgGrad.addColorStop(0, '#0b0b14');
+      bgGrad.addColorStop(1, '#151019');
+    }
+    return bgGrad;
+  }
+
+  /* Offscreen griddle plate: rim + plate fill + 16 rings + 28 spokes baked
+     once (44 stroke calls → one blit per frame). Halo/neon stroke stay dynamic
+     because they pulse with game.glow. */
+  var griddleCache = null;
+  function getGriddleCache() {
+    if (griddleCache) return griddleCache;
+    var pad = 40;
+    var size = (PAN_R + pad) * 2;
+    var c = document.createElement('canvas');
+    c.width = size; c.height = size;
+    var g = c.getContext('2d');
+    var ox = PAN_R + pad, oy = PAN_R + pad;
+    g.translate(ox, oy);
+
+    g.beginPath(); g.arc(0, 0, PAN_R, 0, TAU);
+    var rim = g.createLinearGradient(-PAN_R, -PAN_R, PAN_R, PAN_R);
+    rim.addColorStop(0, '#4d4d5c'); rim.addColorStop(0.33, '#20202a');
+    rim.addColorStop(0.6, '#3b3b48'); rim.addColorStop(1, '#13131b');
+    g.fillStyle = rim; g.fill();
+
+    g.beginPath(); g.arc(0, 0, PAN_R - 13, 0, TAU);
+    var plate = g.createRadialGradient(-34, -44, 8, 0, 0, PAN_R - 13);
+    plate.addColorStop(0, '#2e2e38'); plate.addColorStop(0.62, '#1b1b23'); plate.addColorStop(1, '#0e0e15');
+    g.fillStyle = plate; g.fill();
+
+    g.save();
+    g.beginPath(); g.arc(0, 0, PAN_R - 14, 0, TAU); g.clip();
+    g.strokeStyle = 'rgba(255,255,255,0.032)'; g.lineWidth = 1.6;
+    g.beginPath();
+    var i;
+    for (i = 1; i <= 16; i++) g.arc(0, 0, (PAN_R - 16) * i / 16, 0, TAU);
+    for (i = 0; i < 28; i++) {
+      var a = i / 28 * TAU;
+      g.moveTo(Math.cos(a) * 26, Math.sin(a) * 26);
+      g.lineTo(Math.cos(a) * (PAN_R - 16), Math.sin(a) * (PAN_R - 16));
+    }
+    g.stroke();
+    g.restore();
+
+    griddleCache = { canvas: c, pad: pad, size: size };
+    return griddleCache;
+  }
+
   function drawGriddle() {
     var halo = ctx.createRadialGradient(CX, CY, PAN_R * 0.7, CX, CY, PAN_R + 34);
     halo.addColorStop(0, 'rgba(255,140,40,' + (0.12 + game.glow * 0.14) + ')');
@@ -799,34 +1037,17 @@
     ctx.beginPath(); ctx.arc(CX, CY, PAN_R + 34, 0, TAU);
     ctx.fillStyle = halo; ctx.fill();
 
+    var cache = getGriddleCache();
+    ctx.save();
+    ctx.translate(CX, CY);
+    ctx.rotate(panRot);
+    ctx.drawImage(cache.canvas, -cache.size / 2, -cache.size / 2);
+    ctx.restore();
+
     ctx.beginPath(); ctx.arc(CX, CY, PAN_R, 0, TAU);
-    var rim = ctx.createLinearGradient(CX - PAN_R, CY - PAN_R, CX + PAN_R, CY + PAN_R);
-    rim.addColorStop(0, '#4d4d5c'); rim.addColorStop(0.33, '#20202a');
-    rim.addColorStop(0.6, '#3b3b48'); rim.addColorStop(1, '#13131b');
-    ctx.fillStyle = rim; ctx.fill();
     ctx.lineWidth = 2.5;
     ctx.strokeStyle = 'rgba(34,230,255,' + (0.30 + game.glow * 0.35) + ')';
     ctx.stroke();
-
-    ctx.beginPath(); ctx.arc(CX, CY, PAN_R - 13, 0, TAU);
-    var plate = ctx.createRadialGradient(CX - 34, CY - 44, 8, CX, CY, PAN_R - 13);
-    plate.addColorStop(0, '#2e2e38'); plate.addColorStop(0.62, '#1b1b23'); plate.addColorStop(1, '#0e0e15');
-    ctx.fillStyle = plate; ctx.fill();
-
-    ctx.save();
-    ctx.beginPath(); ctx.arc(CX, CY, PAN_R - 14, 0, TAU); ctx.clip();
-    ctx.translate(CX, CY); ctx.rotate(panRot);
-    ctx.strokeStyle = 'rgba(255,255,255,0.032)'; ctx.lineWidth = 1.6;
-    var i;
-    for (i = 1; i <= 16; i++) { ctx.beginPath(); ctx.arc(0, 0, (PAN_R - 16) * i / 16, 0, TAU); ctx.stroke(); }
-    for (i = 0; i < 28; i++) {
-      var a = i / 28 * TAU;
-      ctx.beginPath();
-      ctx.moveTo(Math.cos(a) * 26, Math.sin(a) * 26);
-      ctx.lineTo(Math.cos(a) * (PAN_R - 16), Math.sin(a) * (PAN_R - 16));
-      ctx.stroke();
-    }
-    ctx.restore();
   }
 
   /* --- batter ------------------------------------------------------------ */
@@ -909,23 +1130,23 @@
     }
 
     if (flipped) {
-      /* crisp blistered texture on the cooked face */
-      for (var b = 0; b < 54; b++) {
-        var ba = (b * 2.399) % TAU, bd = ((b * 0.618) % 1) * 0.9 + 0.05;
-        var bx = px + Math.cos(ba) * bd * r;
-        var by = py + Math.sin(ba) * bd * r;
-        ctx.beginPath(); ctx.arc(bx, by, (2.4 + (b % 4)) * sc, 0, TAU);
+      /* crisp blistered texture on the cooked face (precomputed unit coords) */
+      for (var b = 0; b < BLISTERS.length; b++) {
+        var bl = BLISTERS[b];
+        var bx = px + Math.cos(bl.a) * bl.d * r;
+        var by = py + Math.sin(bl.a) * bl.d * r;
+        ctx.beginPath(); ctx.arc(bx, by, bl.r1 * sc, 0, TAU);
         ctx.fillStyle = 'rgba(255,226,150,.30)'; ctx.fill();
-        ctx.beginPath(); ctx.arc(bx + 1, by + 1, (1.4 + (b % 3)) * sc, 0, TAU);
+        ctx.beginPath(); ctx.arc(bx + 1, by + 1, bl.r2 * sc, 0, TAU);
         ctx.fillStyle = 'rgba(126,66,10,.24)'; ctx.fill();
       }
     } else {
-      /* light browning mottle on the raw side */
-      for (var m = 0; m < 30; m++) {
-        var ma = (m * 2.399) % TAU, md = ((m * 0.613) % 1) * 0.86 + 0.06;
+      /* light browning mottle on the raw side (precomputed unit coords) */
+      for (var m = 0; m < MOTTLES.length; m++) {
+        var mo = MOTTLES[m];
         ctx.beginPath();
-        ctx.ellipse(px + Math.cos(ma) * md * r, py + Math.sin(ma) * md * r,
-          (5 + (m % 4) * 2) * sc, (3.4 + (m % 3) * 1.6) * sc, ma, 0, TAU);
+        ctx.ellipse(px + Math.cos(mo.a) * mo.d * r, py + Math.sin(mo.a) * mo.d * r,
+          mo.rx * sc, mo.ry * sc, mo.a, 0, TAU);
         ctx.fillStyle = 'rgba(206,158,74,.13)';
         ctx.fill();
       }
@@ -1293,7 +1514,10 @@
 
   /* --- scraper: classic T-shaped wooden crepe spreader (bamboo dragonfly) -- */
   function drawScraper() {
-    if (!game.inPan || game.phase === 'folding') return;
+    if (game.phase === 'folding') return;
+    /* Stay visible for the whole active stroke, even if the pointer briefly
+       rides past the pan rim while closing the outer circle. */
+    if (!game.inPan && !game.dragging) return;
 
     /* The tool pivots on the griddle centre: the handle runs outward from the
        centre and the crossbar blade rides at the outer end, right under the
@@ -1540,7 +1764,7 @@
     ctx.beginPath();
     ctx.rect(crepeX - halfFold, crepeY - R - 20, halfFold * 2, (R + 20) * 2);
     ctx.clip();
-    drawCrepeBody(crepeX, crepeY);
+    drawFoldCached(crepeX, crepeY);
     ctx.restore();
 
     /* A wing tips over its crease with a cosine 3D perspective fold: the scale
@@ -1559,7 +1783,7 @@
       ctx.translate(crepeX - halfFold, crepeY);
       ctx.scale(lw, 1);
       ctx.translate(-(crepeX - halfFold), -crepeY);
-      drawCrepeBody(crepeX, crepeY);
+      drawFoldCached(crepeX, crepeY);
       ctx.restore();
     }
 
@@ -1575,7 +1799,7 @@
       ctx.translate(crepeX + halfFold, crepeY);
       ctx.scale(rw, 1);
       ctx.translate(-(crepeX + halfFold), -crepeY);
-      drawCrepeBody(crepeX, crepeY);
+      drawFoldCached(crepeX, crepeY);
       ctx.restore();
     }
 
@@ -1649,7 +1873,7 @@
   }
 
   function drawCrepe() {
-    if (game.phase === 'folding') {
+    if (game.phase === 'folding' || game.phase === 'finishing') {
       drawFoldAnimation(game.foldT);
       return;
     }
@@ -1679,11 +1903,9 @@
     drawCrepeBody(CX, CY);
   }
 
-  function render(dt) {
+  function render() {
     ctx.clearRect(0, 0, W, H);
-    var bg = ctx.createLinearGradient(0, 0, 0, H);
-    bg.addColorStop(0, '#0b0b14'); bg.addColorStop(1, '#151019');
-    ctx.fillStyle = bg;
+    ctx.fillStyle = getBgGrad();
     ctx.fillRect(0, 0, W, H);
     ctx.save();
     ctx.globalAlpha = 0.16;
@@ -1713,17 +1935,31 @@
 
   function pointerUpdate(ev) {
     var p = toCanvas(ev);
-    var dx = p.x - game.lastX, dy = p.y - game.lastY;
-    game.pvx = dx * 60; game.pvy = dy * 60;
     game.lastX = p.x; game.lastY = p.y;
     game.px = p.x; game.py = p.y;
     var d = Math.hypot(p.x - CX, p.y - CY);
-    game.inPan = d < PAN_R + 12;
+    /* Generous margin past the pan rim: the crossbar rides out at
+       MAX_R+26 and the last outer arc needs the pointer at the edge.
+       A tight PAN_R+12 cutoff made the scraper vanish mid-circle and
+       reset swirl, so the final sector could never be banked. */
+    game.inPan = d < PAN_R + 56;
+  }
+
+  function endDrag() {
+    if (!game.dragging) return;
+    game.dragging = false;
+    game.lastSwirlAng = -1;
+    Audio.stopSizzle();
+    updateButtons();
   }
 
   function bindCanvas() {
     cv.addEventListener('pointerdown', function (ev) {
+      /* Only the primary pointer drives the scraper — a second finger must not
+         steal / release the drag mid-stroke. */
+      if (ev.isPrimary === false) return;
       Audio.unlock();
+      if (game.paused || !game.started) return;
       if (game.phase !== 'cooking') return;
       cv.setPointerCapture(ev.pointerId);
       game.dragging = true;
@@ -1736,12 +1972,23 @@
       Audio.startSizzle();
       Audio.spreadScrape();
     });
-    cv.addEventListener('pointermove', function (ev) { pointerUpdate(ev); });
-    window.addEventListener('pointerup', function () {
-      if (game.dragging) { game.dragging = false; Audio.stopSizzle(); }
-      updateButtons();
+    cv.addEventListener('pointermove', function (ev) {
+      if (ev.isPrimary === false) return;
+      pointerUpdate(ev);
     });
-    cv.addEventListener('pointerleave', function () { game.inPan = false; });
+    window.addEventListener('pointerup', function (ev) {
+      if (ev && ev.isPrimary === false) return;
+      endDrag();
+    });
+    cv.addEventListener('pointerleave', function (ev) {
+      /* With pointer capture the stroke continues outside the canvas — only
+         stop when the button is actually up (window pointerup handles that).
+         Ending here made the scraper vanish and killed the final outer arc. */
+      if (!ev || ev.buttons === 0) {
+        game.inPan = false;
+        endDrag();
+      }
+    });
   }
 
   /* Accrue the angle the scraper has swept around the griddle. Unwrapping into
@@ -1795,7 +2042,7 @@
   function updateSpread(dt) {
     if (!game.dragging || game.phase !== 'cooking') return;
 
-    if (!game.batterDone && game.inPan) {
+    if (!game.batterDone) {
       var dAng = trackSwirl();
       if (dAng > 0) {
         var boost = state.upgrades.scraper ? 1.8 : 1.0;
@@ -1823,16 +2070,32 @@
         for (var s = 0; s < ANGLES; s++) sum += blob[s];
         game.coverage = sum / ANGLES;
 
-        /* both gates must be satisfied: 720° of swirl and a full-width crepe */
-        if (game.batterProgress >= 1 && batterRadius(1) >= MAX_R - 0.5 && game.coverage >= 0.99) {
+        /* Once two laps are banked, active swirling near the rim also lifts
+           every angular bin toward `reach`. Without this, a few under-filled
+           sectors can pin coverage just under the finish bar no matter how
+           much the player keeps circling — the crepe already looks done. */
+        if (game.batterProgress >= 1 && reach >= 0.97) {
+          for (var t = 0; t < ANGLES; t++) {
+            var lift = dAng * SWIRL_DEPOSIT * boost * 0.45;
+            var cap = Math.min(1, reach);
+            if (blob[t] < cap) blob[t] = Math.min(cap, blob[t] + lift);
+          }
+          sum = 0;
+          for (var u = 0; u < ANGLES; u++) sum += blob[u];
+          game.coverage = sum / ANGLES;
+        }
+
+        /* Both gates: 720° of swirl and a crepe that is visually at the rim.
+           (Previously required coverage*maxR >= (MAX_R-0.5)/MAX_R ≈ 0.9963,
+           which is invisible on screen but easy to miss with uneven bins.) */
+        if (game.batterProgress >= 1 && maxR >= 0.98 && game.coverage >= 0.97) {
           finishBatter();
         }
       }
       game.hintTick += dt;
       if (game.hintTick >= 0.12) { game.hintTick = 0; updateHint(); }
     } else {
-      /* scraper is off the griddle: drop the reference angle so re-entering from
-         the far side can never be mistaken for a half-lap of swirling */
+      /* base already finished — no further swirl bookkeeping */
       game.lastSwirlAng = -1;
     }
 
@@ -1843,7 +2106,9 @@
         eg.spread = Math.min(1, eg.spread + dt * 1.6);
       }
     }
-    if (Math.random() < 0.35) {
+    /* Rate must scale with dt — a raw per-frame probability made 120Hz
+       displays generate steam twice as fast as 60Hz ones. */
+    if (Math.random() < 0.35 * dt * 60) {
       spawnSteam(game.px + rand(-8, 8), game.py + rand(-8, 8), 0.6);
     }
   }
@@ -1897,12 +2162,16 @@
     resetPan();
     var cust = pick(CUSTOMERS);
     var free = Math.random() < 0.2;
-    var recipe = free ? null : pick(feasibleRecipes());
+    var pool = feasibleRecipes();
+    /* An empty pool (tampered stock, future data edits) must never reach
+       pick([]) — that returned undefined and crashed renderOrderCard. */
+    var recipe = (free || !pool.length) ? null : pick(pool);
+    if (!recipe) free = true;
     var set = recipe ? recipe.set.slice() : [];
     var eggs = recipe ? recipe.eggs : 2;
 
     var complexity = set.length + eggs;
-    var patience = clamp(46 + complexity * 5, 46, 92);
+    var patience = clamp(complexity * 5 + TUNE.PATIENCE_MIN, TUNE.PATIENCE_MIN, TUNE.PATIENCE_MAX);
 
     game.order = {
       cust: cust,
@@ -1971,14 +2240,14 @@
 
     if (order && order.free) {
       bonus = recipe ? recipe.bonus : 0;
-      money = base + bonus + Math.round((base + bonus) * 0.18 * ratio);
+      money = base + bonus + Math.round((base + bonus) * TUNE.SERVE_TIP_FREE * ratio);
       stars = recipe ? 5 : (keys.length >= 2 ? 4 : 3);
     } else if (perfect) {
       bonus = order.recipe ? order.recipe.bonus : 0;
-      money = base + bonus + Math.round((base + bonus) * 0.22 * ratio);
+      money = base + bonus + Math.round((base + bonus) * TUNE.SERVE_TIP_PERFECT * ratio);
       stars = ratio > 0.55 ? 5 : (ratio > 0.28 ? 4 : 3);
     } else {
-      money = Math.round(base * 0.45);
+      money = Math.round(base * TUNE.SERVE_WRONG);
       stars = keys.length > 0 || eggs > 0 ? 2 : 1;
     }
 
@@ -1997,20 +2266,25 @@
     game.phase = 'folding';
     game.foldT = 0;
     game.coinPaid = false;
+    /* Bake the crepe once — drawFoldAnimation blits this instead of re-running
+       the full topping pipeline three times per frame. */
+    buildFoldCache();
     Audio.swoosh();
     Audio.stopSizzle();
     updateButtons();
-    window.setTimeout(finishServe, 1180);
+    /* Completion is driven solely by foldT in loop() (no setTimeout race that
+       could cut the animation short on a laggy frame). */
   }
 
   function finishServe() {
-    if (game.phase !== 'folding') return;
+    if (game.phase !== 'finishing' && game.phase !== 'folding') return;
     var res = game.serveResult || computeServe();
     var order = res.order;
     var perfect = res.perfect;
     var recipe = res.recipe;
     var money = res.money;
     var stars = res.stars;
+    clearFoldCache();
 
     state.cash += money;
     state.dayRevenue += money;
@@ -2024,6 +2298,7 @@
 
     if (perfect) {
       toast('✅ ' + (order.recipe ? order.recipe.name : 'Order') + ' · ' + fmt(money) + ' (' + starRow(stars) + ')', 'gold');
+      if (stars === 5) sdkHappytime();
     } else if (order && order.free) {
       toast('🎲 Chef\'s Special served · ' + fmt(money) + ' (' + starRow(stars) + ')', 'gold');
     } else {
@@ -2038,10 +2313,10 @@
       window.setTimeout(function () {
         toast('🎖️ New secret recipe: ' + recipe.name + '  (+' + fmt(recipe.bonus) + ' bonus)', 'pink');
         renderRecipes();
-      }, 620);
+      }, TUNE.RECIPE_TOAST_MS);
     }
 
-    save();
+    saveNow();
     refreshHud();
     renderRecipes();
 
@@ -2050,10 +2325,19 @@
 
     if (state.dayOrders > 0 && state.dayOrders % 3 === 0) showMidgameAd();
 
-    window.setTimeout(function () {
-      if (game.phase === 'folding') game.phase = 'cooking';
+    /* Hand off to the next customer after a short beat — tracked with a real
+       timer handle so pause / day-end can cancel a pending swap. */
+    scheduleNext(TUNE.NEXT_CUST_MS);
+  }
+
+  var nextTimer = null;
+  function scheduleNext(ms) {
+    if (nextTimer) window.clearTimeout(nextTimer);
+    nextTimer = window.setTimeout(function () {
+      nextTimer = null;
+      if (game.phase === 'folding' || game.phase === 'finishing') game.phase = 'cooking';
       nextCustomer();
-    }, 780);
+    }, ms);
   }
 
   function starRow(n) {
@@ -2069,12 +2353,12 @@
     state.dayOrders++;
     toast('💨 ' + order.cust.n + ' walked away…', 'bad');
     Audio.deny();
-    save();
+    saveNow();
     refreshHud();
     game.order = null;
     renderOrderCard();
     resetPan();
-    window.setTimeout(nextCustomer, 620);
+    scheduleNext(TUNE.GAVEUP_MS);
   }
 
   function closeDay() {
@@ -2084,11 +2368,13 @@
     renderOrderCard();
     Audio.stopSizzle();
     sdkGameplayStop();
+    gameplayRunning = false;
     showMidgameAd();
 
     var avg = state.dayServed > 0 ? state.dayStars / state.dayServed : 0;
+    if (avg >= 4.6) sdkHappytime();
     state.bestRevenue = Math.max(state.bestRevenue, state.dayRevenue);
-    save();
+    saveNow();
     renderReceipt(avg);
     openModal('modal-receipt');
   }
@@ -2123,9 +2409,13 @@
   function startDay() {
     /* A session restart on the same day keeps the day's tally: resetting it here
        would resurrect the refresh-scumming bug the save fields exist to fix. */
-    save();
+    saveNow();
     refreshHud();
-    sdkGameplayStart();
+    game.started = true;
+    if (!game.paused) {
+      sdkGameplayStart();
+      gameplayRunning = true;
+    }
     Audio.startBgm();
     nextCustomer();
   }
@@ -2135,8 +2425,10 @@
    * ======================================================================== */
   var hintTimer = null;
   var patienceTone = '';
+  var lastHintText = null, lastHintCls = null;
   function flashHint(text, cls) {
     var el = $('hint-bar');
+    lastHintText = text; lastHintCls = cls || '';
     el.textContent = text;
     el.className = cls || '';
     if (hintTimer) window.clearTimeout(hintTimer);
@@ -2145,43 +2437,40 @@
 
   function updateHint() {
     var el = $('hint-bar');
-    el.className = '';
-    if (game.phase === 'folding') { el.textContent = '📦 Folding into the kraft bag…'; return; }
-    if (game.phase === 'flipping') { el.textContent = '↺ Flipping — Maillard crust forming…'; return; }
-    if (!game.order) { el.textContent = '🕐 Waiting for the next customer…'; return; }
-
-    /* stage 1 — spreading */
-    if (!game.batterDone) {
-      /* the laps are done but the crepe is still small: the player has been
-         scribbling near the middle instead of working out to the rim */
+    var text, cls = '';
+    if (game.phase === 'folding' || game.phase === 'finishing') { text = '📦 Folding into the kraft bag…'; }
+    else if (game.phase === 'flipping') { text = '↺ Flipping — Maillard crust forming…'; }
+    else if (!game.order) { text = '🕐 Waiting for the next customer…'; }
+    else if (!game.batterDone) {
       if (game.batterProgress >= 1) {
-        el.textContent = 'Keep swirling right out to the rim — the crepe is still too small';
-        el.className = 'warn';
-        return;
+        text = 'Keep swirling right out to the rim — the crepe is still too small';
+        cls = 'warn';
+      } else {
+        var laps = (game.batterProgress * SWIRL_LAPS);
+        text = 'Hold & swirl the scraper to spread the crepe first!  ·  ' +
+          laps.toFixed(1) + ' / ' + SWIRL_LAPS + ' laps';
       }
-      var laps = (game.batterProgress * SWIRL_LAPS);
-      el.textContent = 'Hold & swirl the scraper to spread the crepe first!  ·  ' +
-        laps.toFixed(1) + ' / ' + SWIRL_LAPS + ' laps';
-      return;
-    }
-    /* stage 2 — raw front face */
-    if (!game.flipped) {
-      el.textContent = 'Add egg, scallion & sesame, then hit [Flip the Base]';
-      el.className = 'good';
-      return;
-    }
-    /* stage 3 — flipped, cooked side up */
-    var missing = neededKeys().filter(function (k) { return !game.toppings[k]; });
-    var actualKeys = Object.keys(game.toppings);
-    var eggOk = game.order.free || game.eggs.length === game.order.eggs;
-    var toppingOk = game.order.free || sameSet(game.order.set, actualKeys);
-    if (missing.length || !eggOk || !toppingOk) {
-      el.textContent = 'Brush sauce & load toppings, then hit [Fold & Serve]!';
-      el.className = 'warn';
+    } else if (!game.flipped) {
+      text = 'Add egg, scallion & sesame, then hit [Flip the Base]';
+      cls = 'good';
     } else {
-      el.textContent = 'Brush sauce & load toppings, then hit [Fold & Serve]!  ·  ✅ Order looks right';
-      el.className = 'good';
+      var missing = neededKeys().filter(function (k) { return !game.toppings[k]; });
+      var actualKeys = Object.keys(game.toppings);
+      var eggOk = game.order.free || game.eggs.length === game.order.eggs;
+      var toppingOk = game.order.free || sameSet(game.order.set, actualKeys);
+      if (missing.length || !eggOk || !toppingOk) {
+        text = 'Brush sauce & load toppings, then hit [Fold & Serve]!';
+        cls = 'warn';
+      } else {
+        text = 'Brush sauce & load toppings, then hit [Fold & Serve]!  ·  ✅ Order looks right';
+        cls = 'good';
+      }
     }
+    /* Dirty check — textContent assignment forces layout, so skip no-ops. */
+    if (text === lastHintText && cls === lastHintCls) return;
+    lastHintText = text; lastHintCls = cls;
+    el.textContent = text;
+    el.className = cls;
   }
 
   function neededKeys() {
@@ -2202,25 +2491,40 @@
     updateHint();
   }
 
-  function refreshShelfMarks() {
-    var nodes = document.querySelectorAll('.ing-card');
-    for (var i = 0; i < nodes.length; i++) {
-      var k = nodes[i].getAttribute('data-ing');
-      var on = (k === 'egg') ? game.eggs.length > 0 : !!game.toppings[k];
-      nodes[i].classList.toggle('added', on);
+  /* Cached ing-card lookup — the DOM never changes after boot, so five separate
+     querySelectorAll walks collapse into one boot-time Map read. */
+  var ingCardMap = null;
+  function getIngCard(key) {
+    if (!ingCardMap) {
+      ingCardMap = new Map();
+      var nodes = document.querySelectorAll('.ing-card');
+      for (var i = 0; i < nodes.length; i++) {
+        var k = nodes[i].getAttribute('data-ing');
+        if (k) ingCardMap.set(k, nodes[i]);
+      }
     }
+    return ingCardMap.get(key) || null;
+  }
+  function eachIngCard(fn) {
+    if (!ingCardMap) getIngCard(''); /* force build */
+    ingCardMap.forEach(function (node, key) { fn(node, key); });
+  }
+
+  function refreshShelfMarks() {
+    eachIngCard(function (node, k) {
+      var on = (k === 'egg') ? game.eggs.length > 0 : !!game.toppings[k];
+      node.classList.toggle('added', on);
+    });
     updateReqMarks();
   }
 
   function buildShelves() {
-    var nodes = document.querySelectorAll('.ing-card');
-    for (var i = 0; i < nodes.length; i++) {
-      var k = nodes[i].getAttribute('data-ing');
+    eachIngCard(function (node, k) {
       var ing = INGREDIENTS[k];
-      if (!ing) continue;
-      nodes[i].querySelector('.ing-price').textContent = '+$' + ing.price;
-      refreshStockBadge(nodes[i], k);
-    }
+      if (!ing) return;
+      node.querySelector('.ing-price').textContent = '+$' + ing.price;
+      refreshStockBadge(node, k);
+    });
   }
 
   /* Only the consumables carry a badge. Base larder items are bottomless, so
@@ -2237,11 +2541,9 @@
   }
 
   function refreshAllShelves() {
-    var nodes = document.querySelectorAll('.ing-card');
-    for (var i = 0; i < nodes.length; i++) {
-      var k = nodes[i].getAttribute('data-ing');
-      if (k) refreshStockBadge(nodes[i], k);
-    }
+    eachIngCard(function (node, k) {
+      if (k) refreshStockBadge(node, k);
+    });
   }
 
   /* Which ingredients each side shelf offers in each cooking stage. A card that
@@ -2281,14 +2583,12 @@
     game.shelfStage = st;
 
     var cfg = STAGE_SHELF[st];
-    var nodes = document.querySelectorAll('.ing-card');
-    for (var i = 0; i < nodes.length; i++) {
-      var k = nodes[i].getAttribute('data-ing');
+    eachIngCard(function (node, k) {
       var ing = INGREDIENTS[k];
-      if (!ing) continue;
+      if (!ing) return;
       /* off-stage cards keep their slot, just dimmed and inert */
-      nodes[i].classList.toggle('stage-disabled', cfg[ing.shelf].indexOf(k) < 0);
-    }
+      node.classList.toggle('stage-disabled', cfg[ing.shelf].indexOf(k) < 0);
+    });
 
     var lt = $('shelf-title-left');
     if (lt) lt.textContent = SHELF_TITLE.left[st];
@@ -2350,8 +2650,8 @@
     game.art[key] = makeArt(key);
     if (ing.isSpecial) {
       state.stock[key] = (state.stock[key] || 0) - 1;
-      save();
-      refreshStockBadge(document.querySelector('.ing-card[data-ing="' + key + '"]'), key);
+      saveDebounced();
+      refreshStockBadge(getIngCard(key), key);
     }
     if (key === 'sweetSauce' || key === 'chiliSauce') {
       game.sauces[key] = 1;
@@ -2375,8 +2675,8 @@
     var ing = INGREDIENTS[key];
     if (ing && ing.isSpecial) {
       state.stock[key] = (state.stock[key] || 0) + 1;
-      save();
-      refreshStockBadge(document.querySelector('.ing-card[data-ing="' + key + '"]'), key);
+      saveDebounced();
+      refreshStockBadge(getIngCard(key), key);
     }
     Audio.spreadScrape();
     refreshShelfMarks();
@@ -2384,7 +2684,7 @@
   }
 
   function pulseIng(key) {
-    var node = document.querySelector('.ing-card[data-ing="' + key + '"]');
+    var node = getIngCard(key);
     if (!node) return;
     node.classList.remove('pulse');
     void node.offsetWidth;
@@ -2412,7 +2712,9 @@
       $('cust-pay').textContent = '???';
     } else {
       $('cust-name').innerHTML = order.cust.n + ' <span class="mystery">🎲 MYSTERY ORDER</span>';
-      $('cust-line').textContent = '"' + order.recipe.line + '"';
+      /* Defensive: even if a future recipe-table edit empties the pool, a
+         missing recipe must not throw inside the order card renderer. */
+      $('cust-line').textContent = order.recipe ? '"' + order.recipe.line + '"' : '"Surprise me, chef."';
       $('cust-pay').textContent = fmt(order.value);
     }
     var html = '';
@@ -2465,7 +2767,17 @@
     else fill.style.background = 'linear-gradient(90deg,#ff3b3b,#ff8080)';
   }
 
-  function buildShop() {
+  /* Shop body is only rebuilt when something relevant actually changed —
+     opening the modal reuses the previous HTML otherwise. */
+  var shopDirty = true;
+  function markShopDirty() { shopDirty = true; }
+  function buildShop(force) {
+    if (!force && !shopDirty) {
+      var cashEl = $('shop-cash');
+      if (cashEl) cashEl.textContent = fmt(state.cash);
+      return;
+    }
+    shopDirty = false;
     var cashEl = $('shop-cash');
     if (cashEl) cashEl.textContent = fmt(state.cash);
 
@@ -2511,7 +2823,7 @@
     state.stock[key] = (state.stock[key] || 0) + ing.batch;
     Audio.coin();
     toast('📦 Restocked ' + ing.batch + '× ' + ing.name + '  (In stock: ' + state.stock[key] + ')', 'gold');
-    save(); refreshHud(); buildShop(); refreshAllShelves();
+    saveDebounced(); refreshHud(); markShopDirty(); buildShop(); refreshAllShelves();
   }
 
   function buyUpgrade(key) {
@@ -2522,7 +2834,7 @@
     state.upgrades[key] = true;
     Audio.victory();
     toast('🛠️ Installed ' + u.name + '!', 'gold');
-    save(); refreshHud(); buildShop();
+    saveDebounced(); refreshHud(); markShopDirty(); buildShop();
   }
 
   function adRestockIngredient(key) {
@@ -2532,7 +2844,7 @@
       state.stock[key] = (state.stock[key] || 0) + ing.batch;
       Audio.victory();
       toast('📺 Free delivery: ' + ing.batch + '× ' + ing.name + '  (In stock: ' + state.stock[key] + ')', 'gold');
-      save(); refreshHud(); buildShop(); refreshAllShelves();
+      saveDebounced(); refreshHud(); markShopDirty(); buildShop(); refreshAllShelves();
     }, function (message) {
       toast('⚠️ ' + message, 'bad');
     });
@@ -2583,10 +2895,21 @@
     if (id === 'modal-shop') buildShop();
     if (id === 'modal-recipes') renderRecipes();
     m.classList.add('show');
+    /* Freeze the sim while the player is in a menu — patience used to keep
+       draining, so customers walked away while you were shopping. */
+    pauseGameplay('modal');
+    Audio.stopSizzle();
+    var sheet = m.querySelector('.sheet');
+    if (sheet && sheet.focus) { try { sheet.focus(); } catch (e) {} }
   }
   function closeModal(id) {
     var m = $(id);
     if (m) m.classList.remove('show');
+    if (!document.querySelector('.modal.show')) resumeGameplay('modal');
+  }
+  function closeTopModal() {
+    var m = document.querySelector('.modal.show');
+    if (m) closeModal(m.id);
   }
 
   function toast(text, cls) {
@@ -2616,11 +2939,22 @@
     lastT = ts;
     game.time += dt;
 
+    /* Before "Open the Stall" the loop only re-requests the next frame — no
+       wasted GPU/CPU behind the start overlay's backdrop blur. */
+    if (!game.started) return;
+
+    /* Paused (modal / ad / hidden tab): still paint the last state so closing
+       a modal doesn't flash, but freeze every gameplay system. */
+    if (game.paused) {
+      render();
+      return;
+    }
+
     panRot += dt * (game.coverage > 0.05 ? 0.28 : 0.10);
     updateSpread(dt);
 
     if (game.phase === 'flipping') {
-      game.flipT += dt / 0.78;
+      game.flipT += dt / (TUNE.FLIP_MS / 1000);
       if (game.flipT >= 1) {
         game.flipT = 0;
         game.flipped = true;
@@ -2631,12 +2965,19 @@
     }
 
     if (game.phase === 'folding') {
-      game.foldT = Math.min(1, game.foldT + dt / 1.15);
+      game.foldT = Math.min(1, game.foldT + dt / (TUNE.FOLD_MS / 1000));
+      /* Sole clock for serve completion — a setTimeout could fire while frames
+         were still catching up and cut the payout animation short. Flip to
+         'finishing' first so settle logic runs exactly once, not every frame. */
+      if (game.foldT >= 1) {
+        game.phase = 'finishing';
+        finishServe();
+      }
     }
 
     if (game.coverage > 0.2 && game.phase === 'cooking') {
       game.searTimer += dt;
-      if (game.searTimer > 0.22 && game.sear.length < 90) {
+      if (game.searTimer > TUNE.SEAR_INTERVAL && game.sear.length < TUNE.SEAR_MAX) {
         game.searTimer = 0;
         game.sear.push({
           a: rand(0, TAU),
@@ -2668,7 +3009,7 @@
       if (game.order.patience <= 0) customerGaveUp();
     }
 
-    render(dt);
+    render();
   }
 
 /* ===========================================================================
@@ -2685,32 +3026,42 @@
     var w = wrap.clientWidth, h = wrap.clientHeight;
     if (w <= 0 || h <= 0) return;
     var s = Math.min(w / W, h / H);
-    cv.style.width = Math.floor(W * s) + 'px';
-    cv.style.height = Math.floor(H * s) + 'px';
+    var cssW = Math.floor(W * s);
+    var cssH = Math.floor(H * s);
+    cv.style.width = cssW + 'px';
+    cv.style.height = cssH + 'px';
+    /* Back the CSS size with real device pixels (capped at 2× so fill-rate
+       stays sane) — the old fixed 640×360 bitmap looked soft on every
+       high-DPI / large display. */
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var bw = Math.max(1, Math.floor(cssW * dpr));
+    var bh = Math.max(1, Math.floor(cssH * dpr));
+    if (cv.width !== bw || cv.height !== bh) {
+      cv.width = bw;
+      cv.height = bh;
+      /* Keep the 640×360 logical coordinate system; map it onto the bitmap. */
+      ctx.setTransform(bw / W, 0, 0, bh / H, 0, 0);
+      /* Gradient / offscreen caches are resolution-independent draws — only
+         the griddle blit size depends on transform, so no rebuild needed. */
+      bgGrad = null;
+    }
   }
 
-  function bindUi() {
-    var nodes = document.querySelectorAll('.ing-card');
-    for (var i = 0; i < nodes.length; i++) {
-      (function (node) {
-        node.addEventListener('click', function () { addIngredient(node.getAttribute('data-ing')); });
-      })(nodes[i]);
-    }
+  /* --- UI binding, split by concern so each handler block stays short ----- */
+  function bindShelf() {
+    eachIngCard(function (node) {
+      node.addEventListener('click', function () { addIngredient(node.getAttribute('data-ing')); });
+    });
+  }
 
+  function bindGameActions() {
     $('btn-flip').addEventListener('click', doFlip);
     $('btn-serve').addEventListener('click', doServe);
+  }
 
+  function bindModals() {
     $('btn-shop').addEventListener('click', function () { Audio.unlock(); openModal('modal-shop'); });
     $('btn-recipes').addEventListener('click', function () { Audio.unlock(); openModal('modal-recipes'); });
-
-    $('btn-bgm').addEventListener('click', function () {
-      Audio.unlock();
-      state.muted = !state.muted;
-      Audio.setMuted(state.muted);
-      if (state.muted) Audio.stopBgm(); else Audio.startBgm();
-      $('btn-bgm').textContent = state.muted ? '🔇 Muted' : '🎵 BGM';
-      save();
-    });
 
     var closers = document.querySelectorAll('[data-close]');
     for (var c = 0; c < closers.length; c++) {
@@ -2718,6 +3069,12 @@
         btn.addEventListener('click', function () { closeModal(btn.getAttribute('data-close')); });
       })(closers[c]);
     }
+
+    $('rec-grid').addEventListener('click', function (ev) {
+      var t = ev.target;
+      while (t && t !== $('rec-grid') && !t.getAttribute('data-rec')) t = t.parentNode;
+      if (t && t.getAttribute && t.getAttribute('data-rec')) showClue(t.getAttribute('data-rec'));
+    });
 
     $('shop-list').addEventListener('click', function (ev) {
       var t = ev.target;
@@ -2729,23 +3086,30 @@
       else if (ad) adRestockIngredient(ad);
       else if (up) buyUpgrade(up);
     });
+  }
 
+  function bindAudioToggle() {
+    $('btn-bgm').addEventListener('click', function () {
+      Audio.unlock();
+      state.muted = !state.muted;
+      Audio.setMuted(state.muted);
+      if (state.muted) Audio.stopBgm(); else Audio.startBgm();
+      $('btn-bgm').textContent = state.muted ? '🔇 Muted' : '🎵 BGM';
+      saveDebounced();
+    });
+  }
+
+  function bindAds() {
     $('btn-ad-cash').addEventListener('click', function () {
       Audio.unlock();
       showRewardedAd(function () {
-        state.cash += 60;
+        state.cash += TUNE.AD_CASH;
         Audio.coin();
-        toast('📺 Thanks! +$60 added to your cash box', 'gold');
-        save(); refreshHud(); buildShop();
+        toast('📺 Thanks! +' + fmt(TUNE.AD_CASH) + ' added to your cash box', 'gold');
+        saveDebounced(); refreshHud(); markShopDirty(); buildShop();
       }, function (message) {
         toast('⚠️ ' + message, 'bad');
       });
-    });
-
-    $('rec-grid').addEventListener('click', function (ev) {
-      var t = ev.target;
-      while (t && t !== $('rec-grid') && !t.getAttribute('data-rec')) t = t.parentNode;
-      if (t && t.getAttribute && t.getAttribute('data-rec')) showClue(t.getAttribute('data-rec'));
     });
 
     $('btn-ad-double').addEventListener('click', function () {
@@ -2761,14 +3125,16 @@
         state.dayDoubled = true;
         Audio.coin();
         toast('📺 Revenue doubled! +' + fmt(amt), 'gold');
-        save(); refreshHud();
+        saveNow(); refreshHud();
         renderReceipt(state.dayServed > 0 ? state.dayStars / state.dayServed : 0);
         $('btn-ad-double').disabled = true;
       }, function (message) {
         toast('⚠️ ' + message, 'bad');
       });
     });
+  }
 
+  function bindLifecycle() {
     $('btn-next-day').addEventListener('click', function () {
       Audio.unlock();
       closeModal('modal-receipt');
@@ -2780,7 +3146,7 @@
       state.dayStars = 0;
       state.dayRecipesFound = 0;
       state.dayDoubled = false;
-      save();
+      saveNow();
       startDay();
       refreshHud();
     });
@@ -2788,6 +3154,8 @@
     $('btn-start').addEventListener('click', function () {
       Audio.unlock();
       $('overlay-start').classList.add('hide');
+      game.started = true;
+      lastT = 0;
       Audio.setMuted(state.muted);
       /* Refreshed on an already-finished day: re-open that day's receipt rather
          than handing the player a brand-new batch of customers. The day tally
@@ -2797,14 +3165,63 @@
       startDay();
     });
 
-    window.addEventListener('resize', function () { fitViewport(); fitCanvas(); });
+    function onViewportChange() { fitViewport(); fitCanvas(); }
+    window.addEventListener('resize', onViewportChange);
+    /* Mobile URL-bar show/hide fires visualViewport, not window.resize. */
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', onViewportChange);
+    }
+
     window.addEventListener('keydown', function (ev) {
+      if (ev.code === 'Escape') {
+        closeTopModal();
+        return;
+      }
       var target = ev.target;
       var interactive = target && target.closest && target.closest('button, input, select, textarea, [contenteditable="true"]');
       if (interactive || !$('overlay-start').classList.contains('hide') || document.querySelector('.modal.show')) return;
       if (ev.code === 'Space') { ev.preventDefault(); doFlip(); }
       else if (ev.code === 'Enter') { ev.preventDefault(); doServe(); }
     });
+
+    /* Tab hidden / shown: stop gameplay reporting, halt audio, flush save. */
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) {
+        endDrag();
+        pauseGameplay('hidden');
+        Audio.stopSizzle();
+        Audio.suspend();
+        saveNow();
+      } else {
+        Audio.resumeCtx();
+        lastT = 0;
+        resumeGameplay('visible');
+      }
+    });
+    window.addEventListener('pagehide', function () { saveNow(); });
+    window.addEventListener('blur', function () {
+      endDrag();
+      pauseGameplay('blur');
+      sdkGameplayStop();
+      gameplayRunning = false;
+    });
+    window.addEventListener('focus', function () {
+      resumeGameplay('focus');
+    });
+  }
+
+  function bindUi() {
+    bindShelf();
+    bindGameActions();
+    bindModals();
+    bindAudioToggle();
+    bindAds();
+    bindLifecycle();
+    /* Keep the ad-reward labels as a single source of truth (TUNE.AD_CASH). */
+    var adLabel = $('ad-cash-label');
+    if (adLabel) adLabel.textContent = 'Watch a short ad, get +' + fmt(TUNE.AD_CASH);
+    var adBtn = $('btn-ad-cash');
+    if (adBtn) adBtn.textContent = '📺 Watch Ad (+' + fmt(TUNE.AD_CASH) + ')';
   }
 
   function boot() {
@@ -2814,6 +3231,7 @@
     buildShelves();
     applyShelfStage(true);
     renderRecipes();
+    markShopDirty();
     buildShop();
     renderOrderCard();
     refreshHud();
