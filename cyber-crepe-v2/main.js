@@ -238,7 +238,7 @@
     muted: false
   };
 
-  /* Debounced persistence: rapid stock clicks no longer sync-write localStorage
+  /* Debounced persistence: rapid stock clicks no longer sync-write storage
      on every tap. Settlement points still call saveNow() for an immediate flush. */
   var saveTimer = null;
   function saveNow() {
@@ -250,6 +250,57 @@
     saveTimer = window.setTimeout(function () { saveTimer = null; save(); }, TUNE.SAVE_DEBOUNCE_MS);
   }
 
+  /* ===========================================================================
+   * 2b. PROGRESS STORAGE (CrazyGames Data module + local fallback)
+   * ======================================================================== */
+  /* Full Launch requires progress on the CG account via SDK.data. Off-platform
+     (file:// / self-host) and before init() resolves, keep localStorage so the
+     game still boots. After cgDataReady, reads/writes go through SDK.data.
+     CG_ON_PLATFORM is defined in section 3; function bodies run only later. */
+  var cgDataReady = false;
+
+  function cgData() {
+    if (!window.__CG_ON_PLATFORM__ || !cgDataReady) return null;
+    try {
+      var sdk = window.CrazyGames && window.CrazyGames.SDK;
+      return sdk && sdk.data ? sdk.data : null;
+    } catch (e) { return null; }
+  }
+
+  function storageGet(key) {
+    var data = cgData();
+    if (data) {
+      try {
+        var v = data.getItem(key);
+        return (v === undefined) ? null : v;
+      } catch (e) { /* fall through */ }
+    }
+    try { return window.localStorage.getItem(key); } catch (e) { return null; }
+  }
+
+  function storageSet(key, value) {
+    var data = cgData();
+    if (data) {
+      try { data.setItem(key, value); return; } catch (e) { /* fall through */ }
+    }
+    try { window.localStorage.setItem(key, value); } catch (e) { /* storage unavailable */ }
+  }
+
+  /* Copy any pre-Data-module localStorage save into SDK.data.
+     Cloud progress wins: only fill an empty data-module slot. */
+  function migrateLocalToCgData(keys) {
+    var data = cgData();
+    if (!data) return;
+    keys.forEach(function (key) {
+      try {
+        var cloud = data.getItem(key);
+        if (cloud !== null && cloud !== undefined && cloud !== '') return;
+        var local = window.localStorage.getItem(key);
+        if (local) data.setItem(key, local);
+      } catch (e) { /* migration is best-effort */ }
+    });
+  }
+
   function defaultUnlocked() {
     return ING_KEYS.filter(function (k) { return INGREDIENTS[k].unlocked; });
   }
@@ -259,7 +310,7 @@
     state.unlocked = defaultUnlocked();
     state.stock = defaultStock();
     try {
-      var raw = window.localStorage.getItem(SAVE_KEY);
+      var raw = storageGet(SAVE_KEY);
       if (!raw) return;
       var d = JSON.parse(raw);
       if (!d || typeof d !== 'object') return;
@@ -310,7 +361,7 @@
 
   function save() {
     try {
-      window.localStorage.setItem(SAVE_KEY, JSON.stringify({
+      storageSet(SAVE_KEY, JSON.stringify({
         day: state.day, dayOrders: state.dayOrders, dayRevenue: state.dayRevenue,
         dayServed: state.dayServed, dayLost: state.dayLost, dayStars: state.dayStars,
         dayRecipesFound: state.dayRecipesFound, dayDoubled: state.dayDoubled,
@@ -318,6 +369,22 @@
         upgrades: state.upgrades, bestRevenue: state.bestRevenue, totalServed: state.totalServed, muted: state.muted
       }));
     } catch (e) { /* storage unavailable */ }
+  }
+
+  /* Re-apply a (re)loaded save to surfaces that already booted from the
+     pre-SDK localStorage snapshot. */
+  function applySaveToUi() {
+    refreshHud();
+    renderRecipes();
+    markShopDirty();
+    buildShop();
+    renderOrderCard();
+    updateButtons();
+    $('btn-bgm').textContent = state.muted ? '🔇 Muted' : '🎵 BGM';
+    Audio.setMuted(state.muted);
+    $('start-stats').textContent =
+      'Day ' + state.day + '  ·  Cash ' + fmt(state.cash) + '  ·  Recipes ' +
+      state.recipes.length + '/' + RECIPES.length + '  ·  Orders served ' + state.totalServed;
   }
 
   function maxOrdersPerDay() { return state.upgrades.stall ? 8 : 5; }
@@ -334,28 +401,217 @@
   var midgameAdPending = false;
   var lastMidgameAt = -Infinity;
   var sdkInitStarted = false;
+  /* Pessimistic default: ad CTAs start hidden and only appear after
+     checkAdsAvailability() confirms the ad system is live. CrazyGames QA
+     rejects "rewarded ad buttons without effect" during Basic Launch. */
+  var adsUnavailable = true;
+
+  /* 只有这两种错误码代表"平台永远不给投广告"；其余（adCooldown / unfilled /
+     other）都是瞬时错误，不得永久隐藏激励 CTA。 */
+  function isAdsOffError(err) {
+    var code = err && err.code;
+    return code === 'adsDisabledBasicLaunch' || code === 'adblock';
+  }
+
+  function markAdsUnavailable() {
+    if (adsUnavailable) return;
+    adsUnavailable = true;
+    markShopDirty();
+    if (document.getElementById('modal-shop') &&
+        document.getElementById('modal-shop').classList.contains('show')) {
+      buildShop(true);
+    }
+    refreshAdCtas();
+  }
+
+  function adsUsable() {
+    if (!CG_ON_PLATFORM) return true; /* local/dev simulates ads */
+    /* Optimistic until the platform proves ads are off (Basic Launch /
+       adblock). Never gate on sdkReady here — CTAs would flash-hide during
+       boot and reappear after init. */
+    return !adsUnavailable;
+  }
+
+  function refreshAdCtas() {
+    var hide = CG_ON_PLATFORM && adsUnavailable;
+    var banners = document.querySelectorAll('.ad-banner');
+    for (var i = 0; i < banners.length; i++) {
+      banners[i].style.display = hide ? 'none' : '';
+    }
+    var restock = document.querySelectorAll('[data-adstock]');
+    for (var j = 0; j < restock.length; j++) {
+      restock[j].style.display = hide ? 'none' : '';
+    }
+    var doubleBtn = $('btn-ad-double');
+    if (doubleBtn && hide) doubleBtn.disabled = true;
+  }
+
+  /* Probe the ad system at boot so Basic Launch (ads disabled) and adblock
+     sessions never show rewarded CTAs. A midgame request at game start is
+     suppressed by the SDK (adCooldown) — we only read the error code. */
+  function checkAdsAvailability() {
+    if (!CG_ON_PLATFORM || !sdkReady()) return;
+
+    var settled = false;
+    function setAdsAvailable() {
+      if (!adsUnavailable) return;
+      adsUnavailable = false;
+      refreshAdCtas();
+      markShopDirty();
+      if (document.getElementById('modal-shop') &&
+          document.getElementById('modal-shop').classList.contains('show')) {
+        buildShop(true);
+      }
+    }
+
+    try {
+      window.CrazyGames.SDK.ad.requestAd('midgame', {
+        adStarted: function () { settled = true; setAdsAvailable(); },
+        adFinished: function () { settled = true; setAdsAvailable(); },
+        adError: function (err) {
+          settled = true;
+          var code = err && err.code;
+          if (code !== 'adsDisabledBasicLaunch' && code !== 'adblock') setAdsAvailable();
+        }
+      });
+    } catch (e) { settled = true; /* stay hidden */ }
+
+    /* The SDK may drop a "too early" midgame probe without any callback.
+       Silence is not proof the ads are off — Basic Launch and adblock say so
+       explicitly via the error codes above. Consult hasAdblock before
+       revealing; if that is silent too, keep the CTAs hidden (never ship a
+       rewarded button without effect). */
+    window.setTimeout(function () {
+      if (settled) return;
+      try {
+        var p = window.CrazyGames.SDK.ad.hasAdblock && window.CrazyGames.SDK.ad.hasAdblock();
+        if (p && typeof p.then === 'function') {
+          p.then(function (has) {
+            if (settled) return;
+            settled = true;
+            if (!has) setAdsAvailable();
+          }).catch(function () { settled = true; });
+          return;
+        }
+        if (typeof p === 'boolean') {
+          settled = true;
+          if (!p) setAdsAvailable();
+          return;
+        }
+      } catch (e) {}
+      settled = true;
+    }, 3000);
+  }
 
   /* Ensure SDK.init() runs exactly once as soon as the async script finishes
      loading — previously a race left init permanently skipped on the platform. */
   function sdkInit() {
     if (sdkInitStarted || !CG_ON_PLATFORM) return;
-    if (!window.__cgSdkLoaded__ || !sdkReady()) {
+    if (!window.__cgSdkLoaded__) {
       window.__cgSdkOnLoaded = function () {
         window.__cgSdkOnLoaded = null;
         sdkInit();
       };
       return;
     }
+    /* Script finished (or onerror ran) but CrazyGames is still missing —
+       adblock / failed load. Hide every rewarded CTA immediately. */
+    if (!sdkReady()) {
+      markAdsUnavailable();
+      return;
+    }
     sdkInitStarted = true;
     try {
       var p = window.CrazyGames.SDK.init();
-      if (p && typeof p.then === 'function') p.catch(function () {});
+      if (p && typeof p.then === 'function') {
+        p.then(function () { onSdkReady(); })
+          .catch(function () { /* init failure is non-fatal; ads simply no-op */ });
+      } else {
+        onSdkReady();
+      }
     } catch (e) { /* init failure is non-fatal; ads simply no-op */ }
   }
 
+  /* After SDK.init(): enable Data module storage, migrate any legacy local
+     save, reload progress, then surface the CrazyGames profile (Full Launch). */
+  function onSdkReady() {
+    cgDataReady = true;
+    try { migrateLocalToCgData([SAVE_KEY]); } catch (e) {}
+    loadSave();
+    try { applySaveToUi(); } catch (e) {}
+    loadCgUserProfile();
+    checkAdsAvailability();
+  }
+
+  /* ===========================================================================
+   * 3b. CRAZYGAMES USER (username + avatar for Full Launch)
+   * ======================================================================== */
+  var cgUser = null;
+
+  function loadCgUserProfile() {
+    if (!CG_ON_PLATFORM || !sdkReady() || !window.CrazyGames.SDK.user) {
+      renderCgUserChip(null);
+      return;
+    }
+    var userMod = window.CrazyGames.SDK.user;
+    try {
+      if (userMod.isUserAccountAvailable === false) {
+        renderCgUserChip(null);
+        return;
+      }
+      var p = userMod.getUser();
+      if (p && typeof p.then === 'function') {
+        p.then(function (user) {
+          cgUser = user || null;
+          renderCgUserChip(cgUser);
+        }).catch(function () { renderCgUserChip(null); });
+      }
+      if (typeof userMod.addAuthListener === 'function') {
+        userMod.addAuthListener(function (user) {
+          cgUser = user || null;
+          renderCgUserChip(cgUser);
+        });
+      }
+    } catch (e) { renderCgUserChip(null); }
+  }
+
+  function renderCgUserChip(user) {
+    var chip = $('hud-user');
+    if (!chip) return;
+    if (!user || !user.username) {
+      chip.style.display = 'none';
+      return;
+    }
+    chip.style.display = '';
+    var nameEl = $('hud-user-name');
+    if (nameEl) nameEl.textContent = user.username;
+    var img = $('hud-user-avatar');
+    var ph = $('hud-user-ph');
+    if (img && user.profilePictureUrl) {
+      img.onload = function () {
+        img.style.display = '';
+        if (ph) ph.style.display = 'none';
+      };
+      img.onerror = function () {
+        img.style.display = 'none';
+        if (ph) ph.style.display = '';
+      };
+      img.referrerPolicy = 'no-referrer';
+      img.src = user.profilePictureUrl;
+    } else if (ph) {
+      ph.style.display = '';
+      if (img) img.style.display = 'none';
+    }
+  }
+
   function showRewardedAd(onSuccess, onFailure) {
-    if (rewardedAdPending) {
-      if (onFailure) onFailure('Another rewarded ad is already running.');
+    if (rewardedAdPending || midgameAdPending) {
+      if (onFailure) onFailure('Another ad is already running.');
+      return false;
+    }
+    /* Platform already told us ads are off — never leave a dead CTA path. */
+    if (CG_ON_PLATFORM && adsUnavailable) {
+      if (onFailure) onFailure('Ads are unavailable right now. No reward was granted.');
       return false;
     }
 
@@ -365,9 +621,11 @@
     if (!CG_ON_PLATFORM) {
       rewardedAdPending = true;
       Audio.setMuted(true);
+      pauseGameplay('ad');
       window.setTimeout(function () {
         rewardedAdPending = false;
         Audio.setMuted(state.muted);
+        resumeGameplayAfterAd();
         if (onSuccess) onSuccess();
       }, 1000);
       return true;
@@ -394,21 +652,39 @@
       }
     }
 
+    /* If adStarted already fired, the ad owns mute/pause until adFinished —
+       a guard timeout must not resume underneath it. */
+    var adStartedFired = false;
     try {
       window.CrazyGames.SDK.ad.requestAd("rewarded", {
         /* CrazyGames' terms require the game to be silent for the whole ad
            break, so the master gain is forced to 0 here and put back to the
            player's own preference on every exit path. */
         adStarted: function () {
+          adStartedFired = true;
           Audio.setMuted(true);
+          pauseGameplay('ad');
           sdkGameplayStop();
         },
         adFinished: function () { settle(true); },
         adError: function (err) {
-          settle(false, 'The ad failed or was skipped. No reward was granted.');
+          /* 仅 Basic Launch / adblock 永久隐藏；瞬时错误保留 CTA 供重试。 */
+          if (isAdsOffError(err)) markAdsUnavailable();
+          settle(false, isAdsOffError(err)
+            ? 'Ads are unavailable right now. No reward was granted.'
+            : 'No ad available right now. No reward was granted.');
         }
       });
       adGuard = window.setTimeout(function () {
+        if (adStartedFired) {
+          /* Ad is still running from the SDK's point of view — only clear the
+             pending flag so the game can continue accepting input; leave mute
+             alone (adFinished will restore it). */
+          settled = true;
+          rewardedAdPending = false;
+          if (onFailure) onFailure('The ad is taking too long. No reward was granted.');
+          return;
+        }
         settle(false, 'The ad is taking too long. No reward was granted.');
       }, TUNE.AD_GUARD_MS);
     } catch (err) {
@@ -419,7 +695,7 @@
 
   function showMidgameAd() {
     if (!CG_ON_PLATFORM) return;
-    if (midgameAdPending) return;
+    if (midgameAdPending || rewardedAdPending || adsUnavailable) return;
     var now = Date.now();
     if (now - lastMidgameAt < TUNE.MIDGAME_COOLDOWN_MS) return;
     if (!sdkReady() || !window.CrazyGames.SDK.ad) return;
@@ -428,11 +704,12 @@
     lastMidgameAt = now;
     var settled = false;
     var guard = null;
-    function done() {
+    function done(success, err) {
       if (settled) return;
       settled = true;
       window.clearTimeout(guard);
       midgameAdPending = false;
+      if (success === false && isAdsOffError(err)) markAdsUnavailable();
       Audio.setMuted(state.muted);
       resumeGameplayAfterAd();
     }
@@ -440,10 +717,11 @@
       window.CrazyGames.SDK.ad.requestAd("midgame", {
         adStarted: function () {
           Audio.setMuted(true);
+          pauseGameplay('ad');
           sdkGameplayStop();
         },
-        adFinished: done,
-        adError: done
+        adFinished: function () { done(true); },
+        adError: function (err) { done(false, err); }
       });
       /* SDK that never calls back would otherwise mute the game forever. */
       guard = window.setTimeout(done, TUNE.MIDGAME_TIMEOUT_MS);
@@ -843,6 +1121,9 @@
     /* Never resume while a modal is still open. */
     if (document.querySelector('.modal.show')) return;
     if (rewardedAdPending || midgameAdPending) return;
+    /* Stay paused while the first-time onboarding overlay is up — a tab
+       focus event must not unpause the run under the tutorial. */
+    if ($('overlay-tutorial') && !$('overlay-tutorial').classList.contains('hide')) return;
     game.paused = false;
     if (game.started && game.phase !== 'locked') {
       sdkGameplayStart();
@@ -2335,6 +2616,12 @@
     if (nextTimer) window.clearTimeout(nextTimer);
     nextTimer = window.setTimeout(function () {
       nextTimer = null;
+      /* Defer while a modal/ad pause is active so customers never appear
+         underneath a video ad or shop sheet. */
+      if (game.paused || rewardedAdPending || midgameAdPending) {
+        scheduleNext(200);
+        return;
+      }
       if (game.phase === 'folding' || game.phase === 'finishing') game.phase = 'cooking';
       nextCustomer();
     }, ms);
@@ -2369,6 +2656,9 @@
     Audio.stopSizzle();
     sdkGameplayStop();
     gameplayRunning = false;
+    /* Midgame is offered before the receipt modal opens so the ad can start
+       while the day summary is being read; cooldown + pending flags still
+       prevent stacking with a rewarded ad. */
     showMidgameAd();
 
     var avg = state.dayServed > 0 ? state.dayStars / state.dayServed : 0;
@@ -2403,7 +2693,9 @@
       '<div class="r-quote">"' + quote + '"</div>';
 
     $('receipt-double-amt').textContent = Math.round(state.dayRevenue).toLocaleString('en-US');
-    $('btn-ad-double').disabled = (state.dayRevenue <= 0 || state.dayDoubled);
+    /* Never leave a payable ad CTA enabled when ads are proven off. */
+    $('btn-ad-double').disabled =
+      (state.dayRevenue <= 0 || state.dayDoubled || (CG_ON_PLATFORM && adsUnavailable));
   }
 
   function startDay() {
@@ -2420,7 +2712,42 @@
     nextCustomer();
   }
 
-/* ===========================================================================
+  /* ===========================================================================
+   * 8b. FIRST-TIME ONBOARDING
+   * ======================================================================== */
+  var TUT_KEY = 'cyber_crepe_tutorial_v1';
+  var TUT_STEPS = [
+    { icon: '🫓', title: 'Spread the Batter', text: 'Press &amp; circle the scraper on the griddle to spread the batter evenly.' },
+    { icon: '🥚', title: 'Add Toppings', text: 'Tap ingredients on the shelf to add <b>egg, scallion &amp; sesame</b> — follow the order card.' },
+    { icon: '🍳', title: 'Flip &amp; Serve', text: 'Hit <b>[Flip the Base]</b>, add sauce, fold, then serve to the customer!' }
+  ];
+  var tutStep = 0;
+
+  function maybeShowTutorial() {
+    try { if (window.localStorage.getItem(TUT_KEY)) return; } catch (e) { return; }
+    tutStep = 0;
+    renderTut();
+    $('overlay-tutorial').classList.remove('hide');
+    pauseGameplay('tutorial');
+  }
+
+  function renderTut() {
+    var s = TUT_STEPS[tutStep];
+    $('tut-icon').textContent = s.icon;
+    $('tut-title').textContent = s.title;
+    $('tut-text').innerHTML = s.text;
+    var dots = document.querySelectorAll('.tut-dot');
+    for (var i = 0; i < dots.length; i++) dots[i].classList.toggle('on', i === tutStep);
+    $('tut-next').textContent = tutStep >= TUT_STEPS.length - 1 ? 'Got it!' : 'Next';
+  }
+
+  function closeTut() {
+    $('overlay-tutorial').classList.add('hide');
+    try { window.localStorage.setItem(TUT_KEY, '1'); } catch (e) {}
+    resumeGameplay('tutorial');
+  }
+
+  /* ===========================================================================
    * 8. UI
    * ======================================================================== */
   var hintTimer = null;
@@ -2605,7 +2932,7 @@
     if (game.toppings[key]) { removeIngredient(key); return; }
     if (ing.isSpecial && (state.stock[key] || 0) <= 0) {
       Audio.deny();
-      toast('⚠️ Out of stock! Restock in Shop or watch Ad!', 'bad');
+      toast(adsUsable() ? '⚠️ Out of stock! Restock in Shop or watch Ad!' : '⚠️ Out of stock! Restock in Shop.', 'bad');
       return;
     }
     if (game.phase !== 'cooking') {
@@ -2794,7 +3121,9 @@
         '<div class="si-btns">' +
           '<button class="btn tiny gold" data-restock="' + k + '"' + (canPay ? '' : ' disabled') + '>Restock +' +
             ing.batch + ' ($' + ing.shopPrice + ')</button>' +
-          '<button class="btn tiny pink" data-adstock="' + k + '">📺 Free Stock +' + ing.batch + '</button>' +
+          (adsUsable()
+            ? '<button class="btn tiny pink" data-adstock="' + k + '">📺 Free Stock +' + ing.batch + '</button>'
+            : '') +
         '</div>' +
         '</div>';
     });
@@ -2840,6 +3169,10 @@
   function adRestockIngredient(key) {
     var ing = INGREDIENTS[key];
     if (!ing || !ing.isSpecial) return;
+    if (CG_ON_PLATFORM && adsUnavailable) {
+      toast('⚠️ Ads are unavailable — restock with cash instead.', 'bad');
+      return;
+    }
     showRewardedAd(function () {
       state.stock[key] = (state.stock[key] || 0) + ing.batch;
       Audio.victory();
@@ -2907,11 +3240,6 @@
     if (m) m.classList.remove('show');
     if (!document.querySelector('.modal.show')) resumeGameplay('modal');
   }
-  function closeTopModal() {
-    var m = document.querySelector('.modal.show');
-    if (m) closeModal(m.id);
-  }
-
   function toast(text, cls) {
     var layer = $('toast-layer');
     var el = document.createElement('div');
@@ -3102,6 +3430,10 @@
   function bindAds() {
     $('btn-ad-cash').addEventListener('click', function () {
       Audio.unlock();
+      if (CG_ON_PLATFORM && adsUnavailable) {
+        toast('⚠️ Ads are unavailable right now.', 'bad');
+        return;
+      }
       showRewardedAd(function () {
         state.cash += TUNE.AD_CASH;
         Audio.coin();
@@ -3117,7 +3449,11 @@
       var amt = Math.round(state.dayRevenue);
       /* The latch is the authority, not the disabled attribute: a sandboxed or
          script-driven click must not pay the same day's revenue out twice. */
-      if (amt <= 0 || state.dayDoubled || rewardedAdPending) return;
+      if (amt <= 0 || state.dayDoubled || rewardedAdPending || midgameAdPending) return;
+      if (CG_ON_PLATFORM && adsUnavailable) {
+        toast('⚠️ Ads are unavailable right now.', 'bad');
+        return;
+      }
       showRewardedAd(function () {
         if (state.dayDoubled) return;
         state.cash += amt;
@@ -3151,6 +3487,10 @@
       refreshHud();
     });
 
+    /* Auto-open the stall on a cold start so new players land in gameplay
+       after at most the single Start click (audio unlock + Full Launch rule).
+       The overlay is reduced to that one action; returning players with a
+       finished day still get their receipt via the same path. */
     $('btn-start').addEventListener('click', function () {
       Audio.unlock();
       $('overlay-start').classList.add('hide');
@@ -3163,6 +3503,7 @@
       if (state.dayOrders >= maxOrdersPerDay()) { closeDay(); return; }
       if (!state.muted) Audio.startBgm();
       startDay();
+      maybeShowTutorial();
     });
 
     function onViewportChange() { fitViewport(); fitCanvas(); }
@@ -3173,13 +3514,12 @@
     }
 
     window.addEventListener('keydown', function (ev) {
-      if (ev.code === 'Escape') {
-        closeTopModal();
-        return;
-      }
+      /* Escape is intentionally NOT bound: on the web it exits fullscreen and
+         CrazyGames quality guidelines list it as a restricted key. Close
+         sheets with their ✕ buttons instead. */
       var target = ev.target;
       var interactive = target && target.closest && target.closest('button, input, select, textarea, [contenteditable="true"]');
-      if (interactive || !$('overlay-start').classList.contains('hide') || document.querySelector('.modal.show')) return;
+      if (interactive || !$('overlay-start').classList.contains('hide') || document.querySelector('.modal.show') || !$('overlay-tutorial').classList.contains('hide')) return;
       if (ev.code === 'Space') { ev.preventDefault(); doFlip(); }
       else if (ev.code === 'Enter') { ev.preventDefault(); doServe(); }
     });
@@ -3217,6 +3557,12 @@
     bindAudioToggle();
     bindAds();
     bindLifecycle();
+    $('tut-skip').addEventListener('click', closeTut);
+    $('tut-next').addEventListener('click', function () {
+      if (tutStep >= TUT_STEPS.length - 1) { closeTut(); return; }
+      tutStep++;
+      renderTut();
+    });
     /* Keep the ad-reward labels as a single source of truth (TUNE.AD_CASH). */
     var adLabel = $('ad-cash-label');
     if (adLabel) adLabel.textContent = 'Watch a short ad, get +' + fmt(TUNE.AD_CASH);
@@ -3247,6 +3593,7 @@
       state.recipes.length + '/' + RECIPES.length + '  ·  Orders served ' + state.totalServed;
 
     sdkInit();
+    refreshAdCtas();
     window.requestAnimationFrame(loop);
   }
 

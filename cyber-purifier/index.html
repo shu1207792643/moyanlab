@@ -21,7 +21,9 @@
   script.src = 'https://sdk.crazygames.com/crazygames-sdk-v3.js';
   script.async = true;
   script.onload = function () { window.__cgSdkLoaded__ = true; if (window.__cgSdkOnLoaded) window.__cgSdkOnLoaded(); };
-  script.onerror = function () { window.__cgSdkLoaded__ = true; };
+  /* Must fire the callback too — otherwise adapter.init() waits forever when
+     the SDK is blocked (adlock) and never marks ads unavailable. */
+  script.onerror = function () { window.__cgSdkLoaded__ = true; if (window.__cgSdkOnLoaded) window.__cgSdkOnLoaded(); };
   document.head.appendChild(script);
 })();
 </script>
@@ -62,12 +64,74 @@ body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--ink)
 @media (max-width: 700px) {
   #badge { display: none; }
 }
+/* First-time onboarding overlay */
+#overlay-tutorial {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(6, 9, 16, .82);
+  backdrop-filter: blur(3px);
+}
+#overlay-tutorial.hide { display: none; }
+.tut-card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
+  padding: 28px 32px; max-width: 420px; width: 90%; text-align: center;
+}
+.tut-title {
+  font-size: 18px; font-weight: 900; color: var(--cyan); letter-spacing: 2px;
+  text-transform: uppercase; margin-bottom: 18px;
+}
+.tut-keys {
+  display: flex; flex-direction: column; gap: 12px; margin-bottom: 18px;
+}
+.tut-row {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+}
+.tut-key {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 36px; height: 36px; padding: 0 10px;
+  background: rgba(100, 234, 255, .1); border: 1px solid rgba(100, 234, 255, .35);
+  border-radius: 8px; font-family: "Consolas", monospace; font-size: 13px;
+  font-weight: 700; color: var(--cyan);
+}
+.tut-label {
+  font-size: 13px; color: var(--muted); margin-left: 6px;
+}
+.tut-desc {
+  font-size: 12.5px; color: var(--muted); line-height: 1.6; margin-bottom: 20px;
+}
+.tut-btn {
+  padding: 10px 32px; border-radius: 10px; border: 1px solid var(--cyan);
+  background: rgba(100, 234, 255, .15); color: var(--cyan);
+  font-size: 14px; font-weight: 800; letter-spacing: 1px; cursor: pointer;
+}
+.tut-btn:hover { background: rgba(100, 234, 255, .28); }
 </style>
 </head>
 <body>
 <canvas id="game"></canvas>
 <div id="veil"></div>
 <div id="badge">MOYAN LAB // CYPHER DIVISION // v1.0.0</div>
+<div id="overlay-tutorial" class="hide">
+  <div class="tut-card">
+    <div class="tut-title">How to Play</div>
+    <div class="tut-keys">
+      <div class="tut-row">
+        <span class="tut-key">W</span><span class="tut-key">A</span><span class="tut-key">S</span><span class="tut-key">D</span>
+        <span class="tut-label">/ Arrows — Move</span>
+      </div>
+      <div class="tut-row">
+        <span class="tut-key">SPACE</span>
+        <span class="tut-label">— Dash</span>
+      </div>
+      <div class="tut-row">
+        <span class="tut-key">P</span>
+        <span class="tut-label">— Pause</span>
+      </div>
+    </div>
+    <div class="tut-desc">Survive the swarm · Collect energy · Level up &amp; evolve</div>
+    <button class="tut-btn" id="tut-gotit">Got it!</button>
+  </div>
+</div>
 <script>
 'use strict';
 
@@ -102,6 +166,56 @@ function roundRectPath(ctx, x, y, w, h, r) {
   else ctx.rect(x, y, w, h);
 }
 const META_KEY = 'cyber_save_v1';
+const RUN_KEY = 'cyberPurifierRunV1';
+const TUTORIAL_KEY = 'cyber_purifier_onboard_v1';
+/* Full Launch: progress must live on the CrazyGames account via SDK.data.
+   Before init resolves (and off-platform), fall back to localStorage. */
+let cgDataReady = false;
+function cgData() {
+  if (window.__CG_ON_PLATFORM__ !== true || !cgDataReady) return null;
+  try {
+    const sdk = window.CrazyGames && window.CrazyGames.SDK;
+    return sdk && sdk.data ? sdk.data : null;
+  } catch (e) { return null; }
+}
+function storageGet(key) {
+  const data = cgData();
+  if (data) {
+    try {
+      const v = data.getItem(key);
+      if (v !== undefined) return v;
+    } catch (e) { /* fall through */ }
+  }
+  try { return localStorage.getItem(key); } catch (e) { return null; }
+}
+function storageSet(key, value) {
+  const data = cgData();
+  if (data) {
+    try { data.setItem(key, value); return; } catch (e) { /* fall through */ }
+  }
+  try { localStorage.setItem(key, value); } catch (e) {}
+}
+function storageRemove(key) {
+  const data = cgData();
+  if (data) {
+    try { data.removeItem(key); } catch (e) { /* fall through */ }
+  }
+  try { localStorage.removeItem(key); } catch (e) {}
+}
+/* Copy legacy localStorage saves into empty Data-module slots only —
+   existing cloud/guest Data progress always wins. */
+function migrateLocalToCgData(keys) {
+  const data = cgData();
+  if (!data) return;
+  for (const key of keys) {
+    try {
+      const cloud = data.getItem(key);
+      if (cloud !== null && cloud !== undefined && cloud !== '') continue;
+      const local = localStorage.getItem(key);
+      if (local) data.setItem(key, local);
+    } catch (e) { /* best-effort */ }
+  }
+}
 const TALENTS = [
   { key: 'armor', name: 'NANO ARMOR', desc: '+20 MAX HP PER LV', color: '#ff5d96' },
   { key: 'engine', name: 'OVERCLOCK ENGINE', desc: '+6% MOVE SPEED', color: '#6bf5ff' },
@@ -116,7 +230,7 @@ function defaultMeta() {
 function readMeta() {
   const base = defaultMeta();
   try {
-    const saved = JSON.parse(localStorage.getItem(META_KEY) || 'null');
+    const saved = JSON.parse(storageGet(META_KEY) || 'null');
     if (!saved || typeof saved !== 'object') return base;
     base.chips = Math.max(0, Number(saved.chips) || 0);
     const bs = saved.bestScore && typeof saved.bestScore === 'object' ? saved.bestScore : {};
@@ -136,7 +250,7 @@ function readMeta() {
   return base;
 }
 function writeMeta(meta) {
-  try { localStorage.setItem(META_KEY, JSON.stringify(meta)); } catch (e) {}
+  try { storageSet(META_KEY, JSON.stringify(meta)); } catch (e) {}
 }
 function todayKey() {
   const d = new Date();
@@ -150,10 +264,73 @@ class CrazyGamesAdapter {
     this.busy = false;
     this.lastMidgame = 0;
     this.gameplayActive = false;
+    /* Pessimistic default: ad CTAs start hidden and only appear after
+       checkAdsAvailability() confirms the ad system is live. */
+    this.adsUnavailable = true;
     // 由页面顶部的环境探测结果决定：只有 CrazyGames 官方域名才接线上广告，
     // 本地 file:// 与自托管站点一律走本地模拟。
     this.onPlatform = window.__CG_ON_PLATFORM__ === true;
-    this.init();
+    /* Resolves when SDK.init finished (or immediately off-platform) so the
+       engine can migrate/reload Data-module progress before deciding to
+       auto-start a fresh run. */
+    this.readyPromise = this.init();
+  }
+  whenReady() { return this.readyPromise; }
+  adsUsable() {
+    if (!this.onPlatform) return true;
+    return !this.adsUnavailable;
+  }
+  isAdsOffError(err) {
+    const code = err && err.code;
+    return code === 'adsDisabledBasicLaunch' || code === 'adblock';
+  }
+  markAdsUnavailable() {
+    if (this.adsUnavailable) return;
+    this.adsUnavailable = true;
+  }
+  checkAdsAvailability() {
+    if (!this.onPlatform || !this.sdk) return;
+    let settled = false;
+    const setAdsAvailable = () => {
+      if (!this.adsUnavailable) return;
+      this.adsUnavailable = false;
+    };
+    try {
+      this.sdk.ad.requestAd('midgame', {
+        adStarted: () => { settled = true; setAdsAvailable(); },
+        adFinished: () => { settled = true; setAdsAvailable(); },
+        adError: (err) => {
+          settled = true;
+          const code = err && err.code;
+          if (code !== 'adsDisabledBasicLaunch' && code !== 'adblock') setAdsAvailable();
+        }
+      });
+    } catch (e) { settled = true; /* stay hidden */ }
+    /* The SDK may drop a "too early" midgame probe without any callback.
+       Silence is not proof the ads are off — Basic Launch and adblock say so
+       explicitly via the error codes above. Consult hasAdblock before
+       revealing; if that is silent too, keep the CTAs hidden (never ship a
+       rewarded button without effect). */
+    setTimeout(() => {
+      if (settled) return;
+      try {
+        const p = this.sdk.ad.hasAdblock && this.sdk.ad.hasAdblock();
+        if (p && typeof p.then === 'function') {
+          p.then((has) => {
+            if (settled) return;
+            settled = true;
+            if (!has) setAdsAvailable();
+          }).catch(() => { settled = true; });
+          return;
+        }
+        if (typeof p === 'boolean') {
+          settled = true;
+          if (!p) setAdsAvailable();
+          return;
+        }
+      } catch (e) {}
+      settled = true;
+    }, 3000);
   }
   async init() {
     if (!this.onPlatform) return;
@@ -168,8 +345,14 @@ class CrazyGamesAdapter {
     try {
       if (window.CrazyGames && window.CrazyGames.SDK) {
         await window.CrazyGames.SDK.init();
+        cgDataReady = true;
+        migrateLocalToCgData([META_KEY, RUN_KEY]);
       }
     } catch (e) {}
+    /* SDK script finished loading but the global is still missing (adblock /
+       failed load): mark ads off now so rewarded CTAs never sit dead. */
+    if (!window.CrazyGames || !window.CrazyGames.SDK) this.markAdsUnavailable();
+    else this.checkAdsAvailability();
   }
   get sdk() { return this.onPlatform && window.CrazyGames && window.CrazyGames.SDK ? window.CrazyGames.SDK : null; }
   gameplayStart() {
@@ -185,17 +368,30 @@ class CrazyGamesAdapter {
   happytime() { try { this.sdk?.game?.happytime?.(); } catch (e) {} }
   request(type, onReward, onFail) {
     if (this.busy) { onFail?.(); return false; }
+    if (this.onPlatform && this.adsUnavailable) { onFail?.(); return false; }
     this.busy = true;
+    const sdk = this.sdk;
+    /* Per-request settle flag: the 180s watchdog must not race a late
+       adFinished — reward after "AD FAILED" is a policy/UX bug. */
+    let settled = false;
     const finish = () => {
+      if (settled) return;
+      settled = true;
       this.busy = false;
       this.audio?.unmute();
       this.gameplayStop();
       onReward?.();
     };
-    const fail = () => {
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
       this.busy = false;
       this.audio?.unmute();
       this.gameplayStop();
+      /* 仅 Basic Launch / adblock 永久隐藏；adCooldown / unfilled 等瞬时错误
+         保留 CTA，玩家稍后可重试。SDK 无回调的 180s 兜底 fail() 不带 err，
+         同样不会误隐藏。 */
+      if (this.onPlatform && this.isAdsOffError(err)) this.markAdsUnavailable();
       onFail?.();
     };
     const start = () => {
@@ -203,11 +399,10 @@ class CrazyGamesAdapter {
       this.gameplayStop();
     };
 
-    const sdk = this.sdk;
     if (!sdk?.ad?.requestAd) {
       /* On the CrazyGames domain the SDK must never "succeed" without a real
          ad — that is a policy violation. Only off-platform hosts simulate. */
-      if (this.onPlatform) { this.busy = false; onFail?.(); return false; }
+      if (this.onPlatform) { this.busy = false; this.markAdsUnavailable(); onFail?.(); return false; }
       start();
       setTimeout(finish, 1000);
       return true;
@@ -215,12 +410,13 @@ class CrazyGamesAdapter {
     try {
       sdk.ad.requestAd(type, { adStarted: start, adFinished: finish, adError: fail });
       /* Guard: an SDK that swallows the request would leave busy stuck forever. */
-      setTimeout(() => { if (this.busy) fail(); }, 180000);
+      setTimeout(() => { if (!settled) fail(); }, 180000);
     } catch (e) { fail(); }
     return true;
   }
   rewarded(onReward, onFail) { return this.request('rewarded', onReward, onFail); }
   midgame(onDone) {
+    if (!this.adsUsable()) { onDone?.(); return false; }
     if (performance.now() - this.lastMidgame < 180000) { onDone?.(); return false; }
     this.lastMidgame = performance.now();
     return this.request('midgame', onDone, onDone);
@@ -1292,10 +1488,19 @@ function clearInput() {
   touchState.id = null;
 }
 window.addEventListener('keydown', event => {
+  /* Wait for the ad overlay: keyboard must not start upgrades / leave
+     screens while a rewarded or midgame request is in flight. */
+  if (engine && engine.sdk && engine.sdk.busy) return;
+  const tutEl = document.getElementById('overlay-tutorial');
+  if (tutEl && !tutEl.classList.contains('hide')) return;
+  engine.audio.boot();
+  engine.audio.resume();
   const key = event.key.toLowerCase();
   input.add(key);
   if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) event.preventDefault();
-  if ((key === 'escape' || key === 'p') && !event.repeat) {
+  /* Escape is intentionally NOT bound — on the web it exits fullscreen and
+     CrazyGames lists it as a restricted key. Pause stays on P. */
+  if (key === 'p' && !event.repeat) {
     if (engine.state === 'lab') engine.state = 'menu';
     else engine.togglePause();
   }
@@ -1324,6 +1529,8 @@ canvas.addEventListener('pointermove', event => {
   }
 });
 canvas.addEventListener('pointerdown', event => {
+  const tutEl = document.getElementById('overlay-tutorial');
+  if (tutEl && !tutEl.classList.contains('hide')) return;
   pointer.down = true;
   engine.audio.boot();
   const rect = canvas.getBoundingClientRect();
@@ -1407,6 +1614,7 @@ class GameEngine {
     this.rerollUsed = false;
     this.doubleClaimed = false;
     this.evolutionNotice = null;
+    this.adNotice = null;
     this.camera = { x: 0, y: 0 };
     this.step = 1 / 60;
     this._hasSave = false;
@@ -1417,6 +1625,17 @@ class GameEngine {
     this.stars = Array.from({ length: 90 }, () => ({ x: rand(-1600, 1600), y: rand(-1000, 1000), r: rand(.5, 2), a: rand(.15, .65) }));
     this.loop = this.loop.bind(this);
     requestAnimationFrame(this.loop);
+    /* Fresh profile: land directly in gameplay. Wait for SDK.init first on
+       platform so Data-module migration runs before we read the save — otherwise
+       a cloud/guest progress blob could be missed and we would wrongly auto-start. */
+    this.sdk.whenReady().then(() => {
+      if (this.state !== 'menu') return;
+      this.meta = readMeta();
+      this.audio.setUserMuted(!!this.meta.muted);
+      this.refreshMenuSave();
+      this.startIfFresh();
+      this.loadCgProfile();
+    });
   }
   resetWorld() {
     this.time = 0;
@@ -1451,6 +1670,7 @@ class GameEngine {
     this.rerollUsed = false;
     this.doubleClaimed = false;
     this.evolutionNotice = null;
+    this.adNotice = null;
     this.ready = 0;
     this.refreshMenuSave();
   }
@@ -1462,7 +1682,80 @@ class GameEngine {
     this.state = 'playing';
     this.sdk.gameplayStart();
   }
+  /* First visit: land directly in gameplay (CrazyGames Full Launch:
+     "land new users in gameplay immediately", max 1 click). Audio unlocks
+     on the first pointer/keydown via the existing boot() handlers. */
+  startIfFresh() {
+    if (this.state !== 'menu') return;
+    /* Returning player with a saved run: refresh the RESUME button state —
+       the constructor leaves _hasSave false and no other boot path runs. */
+    if (this.hasSaveData()) { this.refreshMenuSave(); return; }
+    this.start();
+    maybeShowTutorial();
+  }
   openLab() { this.state = 'lab'; this.meta = readMeta(); this.audio.click(); }
+
+  /* CrazyGames profile for Full Launch: show username + avatar on the menu. */
+  loadCgProfile() {
+    this.cgUser = null;
+    this.cgAvatar = null;
+    if (!this.sdk.onPlatform) return;
+    try {
+      const userMod = this.sdk.sdk && this.sdk.sdk.user;
+      if (!userMod || userMod.isUserAccountAvailable === false) return;
+      const p = userMod.getUser();
+      if (p && typeof p.then === 'function') {
+        p.then(user => {
+          this.cgUser = user || null;
+          if (user && user.profilePictureUrl) {
+            const img = new Image();
+            img.referrerPolicy = 'no-referrer';
+            img.onload = () => { this.cgAvatar = img; };
+            img.src = user.profilePictureUrl;
+          }
+        }).catch(() => {});
+      }
+      if (typeof userMod.addAuthListener === 'function') {
+        userMod.addAuthListener(user => {
+          this.cgUser = user || null;
+          this.cgAvatar = null;
+          if (user && user.profilePictureUrl) {
+            const img = new Image();
+            img.referrerPolicy = 'no-referrer';
+            img.onload = () => { this.cgAvatar = img; };
+            img.src = user.profilePictureUrl;
+          }
+        });
+      }
+    } catch (e) { /* profile display is non-critical */ }
+  }
+
+  drawCgProfile() {
+    if (!this.cgUser || !this.cgUser.username) return;
+    ctx.save();
+    ctx.font = '700 13px "Segoe UI", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    const y = viewH * .50;
+    const nameW = ctx.measureText(this.cgUser.username).width;
+    const hasAv = !!(this.cgAvatar && this.cgAvatar.complete && this.cgAvatar.naturalWidth);
+    const gap = hasAv ? 8 : 0;
+    const size = 24;
+    const totalW = (hasAv ? size + gap : 0) + nameW;
+    let x = viewW / 2 - totalW / 2;
+    if (hasAv) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(x + size / 2, y, size / 2, 0, TAU);
+      ctx.clip();
+      ctx.drawImage(this.cgAvatar, x, y - size / 2, size, size);
+      ctx.restore();
+      x += size + gap;
+    }
+    ctx.fillStyle = '#8fd4ff';
+    ctx.fillText(this.cgUser.username, x, y);
+    ctx.restore();
+  }
   talentCost(level) { return 80 + level * 100; }
   buyTalent(index) {
     const talent = TALENTS[index];
@@ -1477,12 +1770,24 @@ class GameEngine {
   }
   claimSupply() {
     if (dailyClaimed(this.meta)) return;
-    this.sdk.rewarded(() => {
+    if (this.sdk.busy) { this.flashNotice('AD IN PROGRESS'); return; }
+    if (!this.sdk.adsUsable()) { this.flashNotice('ADS UNAVAILABLE — DAILY SUPPLY LOCKED'); return; }
+    if (this.sdk.busy) { this.flashNotice('AD IN PROGRESS — WAIT'); return; }
+    /* Optimistic CTAs are fine until ads prove off; if another ad is already
+       in flight, say so instead of a misleading "ADS UNAVAILABLE". */
+    if (this.sdk.busy) { this.flashNotice('AD IN PROGRESS — WAIT'); return; }
+    const started = this.sdk.rewarded(() => {
       this.meta.chips += 500;
       this.meta.daily = todayKey();
       writeMeta(this.meta);
       this.audio.levelUp();
+    }, () => {
+      this.flashNotice('AD FAILED — NO REWARD GRANTED');
     });
+    if (!started) this.flashNotice('ADS UNAVAILABLE — DAILY SUPPLY LOCKED');
+  }
+  flashNotice(text) {
+    this.adNotice = { text, timer: 2.4 };
   }
   toggleMute() {
     this.meta.muted = !this.meta.muted;
@@ -1519,12 +1824,12 @@ class GameEngine {
     this._hasSave = this.hasSaveData();
     this._saveSum = this._hasSave ? this.savedRunSummary() : null;
   }
-  get saveKey() { return 'cyberPurifierRunV1'; }
-  hasSaveData() { try { return !!localStorage.getItem(this.saveKey); } catch (e) { return false; } }
+  get saveKey() { return RUN_KEY; }
+  hasSaveData() { try { return !!storageGet(this.saveKey); } catch (e) { return false; } }
   waveLabel() { return this.time < 90 ? 'WAVE 01' : this.time < 180 ? 'WAVE 02' : 'WAVE 03'; }
   savedRunSummary() {
     try {
-      const s = JSON.parse(localStorage.getItem(this.saveKey) || '');
+      const s = JSON.parse(storageGet(this.saveKey) || '');
       return { wave: (s.time || 0) < 90 ? 1 : (s.time || 0) < 180 ? 2 : 3, time: s.time || 0 };
     } catch (e) { return null; }
   }
@@ -1539,7 +1844,7 @@ class GameEngine {
   }
   saveRun() {
     if (!['playing', 'paused'].includes(this.state)) return;
-    try { localStorage.setItem(this.saveKey, JSON.stringify(this.serializeRun())); } catch (e) {}
+    try { storageSet(this.saveKey, JSON.stringify(this.serializeRun())); } catch (e) {}
     this.audio.click();
     this.sdk.gameplayStop();
     this.audio.resume();
@@ -1549,7 +1854,7 @@ class GameEngine {
   }
   loadRun() {
     let raw = null;
-    try { raw = localStorage.getItem(this.saveKey); } catch (e) {}
+    try { raw = storageGet(this.saveKey); } catch (e) {}
     if (!raw) { this.start(); return; }
     let s;
     try { s = JSON.parse(raw); } catch (e) { this.start(); return; }
@@ -1591,21 +1896,27 @@ class GameEngine {
     this.resetWorld();
     this.state = 'menu';
   }
-  clearSave() { try { localStorage.removeItem(this.saveKey); } catch (e) {} this.refreshMenuSave(); }
+  clearSave() { try { storageRemove(this.saveKey); } catch (e) {} this.refreshMenuSave(); }
 
   loop(now) {
     let frame = (now - this.last) / 1000;
     this.last = now;
     if (frame > .1) frame = .1;
-    this.acc += frame * this.slowMo;
-    /* Cap substeps so a hitch can't spiral into a death spiral of catch-up. */
-    let steps = 0;
-    while (this.acc >= this.step && steps < 5) {
-      this.update(this.step);
-      this.acc -= this.step;
-      steps++;
+    /* Freeze game logic while the onboarding overlay is up — enemies and
+       bullets must not advance while the player is reading the controls. */
+    const tutEl = document.getElementById('overlay-tutorial');
+    const tutActive = tutEl && !tutEl.classList.contains('hide');
+    if (!tutActive) {
+      this.acc += frame * this.slowMo;
+      /* Cap substeps so a hitch can't spiral into a death spiral of catch-up. */
+      let steps = 0;
+      while (this.acc >= this.step && steps < 5) {
+        this.update(this.step);
+        this.acc -= this.step;
+        steps++;
+      }
+      if (this.acc > this.step * 5) this.acc = 0;
     }
-    if (this.acc > this.step * 5) this.acc = 0;
     this.render();
     requestAnimationFrame(this.loop);
   }
@@ -1617,6 +1928,10 @@ class GameEngine {
     if (this.evolutionNotice) {
       this.evolutionNotice.timer -= dt;
       if (this.evolutionNotice.timer <= 0) this.evolutionNotice = null;
+    }
+    if (this.adNotice) {
+      this.adNotice.timer -= dt;
+      if (this.adNotice.timer <= 0) this.adNotice = null;
     }
 
     if (this.state === 'revive') {
@@ -1951,11 +2266,17 @@ class GameEngine {
   }
   rerollCards() {
     if (this.rerollUsed) return;
-    this.sdk.rewarded(() => {
+    if (this.sdk.busy) { this.flashNotice('AD IN PROGRESS'); return; }
+    if (!this.sdk.adsUsable()) { this.flashNotice('ADS UNAVAILABLE — PICK ONE OF THE THREE'); return; }
+    if (this.sdk.busy) { this.flashNotice('AD IN PROGRESS — WAIT'); return; }
+    const started = this.sdk.rewarded(() => {
       this.upgrades = this.makeUpgrades();
       this.rerollUsed = true;
       this.audio.levelUp();
+    }, () => {
+      this.flashNotice('AD FAILED — NO REWARD GRANTED');
     });
+    if (!started) this.flashNotice('ADS UNAVAILABLE — PICK ONE OF THE THREE');
   }
 
   promptRevive() {
@@ -1967,7 +2288,14 @@ class GameEngine {
     this.audio.warning();
   }
   acceptRevive() {
-    if (this.reviveAdActive || this.reviveUsed) return;
+    if (this.reviveAdActive || this.reviveUsed || this.sdk.busy) return;
+    /* Optional reward path: if ads are off the player still has [GIVE UP],
+       never a revive button that silently does nothing. */
+    if (!this.sdk.adsUsable()) {
+      this.flashNotice('ADS UNAVAILABLE — USE GIVE UP');
+      return;
+    }
+    if (this.sdk.busy) { this.flashNotice('AD IN PROGRESS — WAIT'); return; }
     const started = this.sdk.rewarded(() => {
       this.reviveAdActive = false;
       this.reviveUsed = true;
@@ -1980,7 +2308,9 @@ class GameEngine {
       this.sdk.gameplayStart();
     }, () => {
       this.reviveAdActive = false;
-      this.lose();
+      this.flashNotice('AD FAILED — NO REWARD GRANTED');
+      /* Keep the countdown screen so the player can still give up consciously. */
+      this.reviveTimer = Math.max(this.reviveTimer, 1.5);
     });
     if (started) this.reviveAdActive = true;
   }
@@ -2013,16 +2343,24 @@ class GameEngine {
   }
   claimDoubleChips() {
     if (this.doubleClaimed) return;
-    this.sdk.rewarded(() => {
+    if (this.sdk.busy) { this.flashNotice('AD IN PROGRESS'); return; }
+    if (!this.sdk.adsUsable()) { this.flashNotice('ADS UNAVAILABLE — CANNOT DOUBLE'); return; }
+    if (this.sdk.busy) { this.flashNotice('AD IN PROGRESS — WAIT'); return; }
+    const started = this.sdk.rewarded(() => {
       this.meta.chips += this.chipsRun;
       this.chipsRun *= 2;
       this.doubleClaimed = true;
       writeMeta(this.meta);
       this.audio.levelUp();
+    }, () => {
+      this.flashNotice('AD FAILED — NO REWARD GRANTED');
     });
+    if (!started) this.flashNotice('ADS UNAVAILABLE — CANNOT DOUBLE');
   }
 
   click(x, y) {
+    /* Another ad is in flight — ignore navigation clicks until it settles. */
+    if (this.sdk.busy) return;
     if (this.state === 'menu') {
       const resumed = this.resumeButton();
       if (this._hasSave && x >= resumed.x && x <= resumed.x + resumed.w && y >= resumed.y && y <= resumed.y + resumed.h) { this.loadRun(); return; }
@@ -2034,7 +2372,7 @@ class GameEngine {
       const backBtn = { x: 30, y: 30, w: 110, h: 42 };
       if (x >= backBtn.x && x <= backBtn.x + backBtn.w && y >= backBtn.y && y <= backBtn.y + backBtn.h) { this.state = 'menu'; return; }
       const supplyBtn = this.supplyButton();
-      if (x >= supplyBtn.x && x <= supplyBtn.x + supplyBtn.w && y >= supplyBtn.y && y <= supplyBtn.y + supplyBtn.h) { this.claimSupply(); return; }
+      if (this.sdk.adsUsable() && x >= supplyBtn.x && x <= supplyBtn.x + supplyBtn.w && y >= supplyBtn.y && y <= supplyBtn.y + supplyBtn.h) { this.claimSupply(); return; }
       TALENTS.forEach((talent, idx) => {
         const btn = this.talentButton(idx);
         if (x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h) this.buyTalent(idx);
@@ -2049,18 +2387,18 @@ class GameEngine {
       const cards = this.cardRects();
       cards.forEach((rect, idx) => { if (x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h) this.chooseUpgrade(idx); });
       const reroll = this.rerollButton();
-      if (!this.rerollUsed && x >= reroll.x && x <= reroll.x + reroll.w && y >= reroll.y && y <= reroll.y + reroll.h) this.rerollCards();
+      if (this.sdk.adsUsable() && !this.rerollUsed && x >= reroll.x && x <= reroll.x + reroll.w && y >= reroll.y && y <= reroll.y + reroll.h) this.rerollCards();
     } else if (this.state === 'revive') {
       if (this.reviveAdActive) return;
       const btn = this.reviveModalButton();
-      if (x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h) this.acceptRevive();
+      if (this.sdk.adsUsable() && x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h) this.acceptRevive();
       const giveUp = { x: viewW / 2 - 80, y: viewH * .68, w: 160, h: 36 };
       if (x >= giveUp.x && x <= giveUp.x + giveUp.w && y >= giveUp.y && y <= giveUp.y + giveUp.h) this.lose();
     } else if (this.state === 'result') {
       const button = this.resultButton();
       if (x >= button.x && x <= button.x + button.w && y >= button.y && y <= button.y + button.h) { this.returnToMenu(); return; }
       const doubleBtn = this.doubleButton();
-      if (!this.doubleClaimed && x >= doubleBtn.x && x <= doubleBtn.x + doubleBtn.w && y >= doubleBtn.y && y <= doubleBtn.y + doubleBtn.h) this.claimDoubleChips();
+      if (this.sdk.adsUsable() && !this.doubleClaimed && x >= doubleBtn.x && x <= doubleBtn.x + doubleBtn.w && y >= doubleBtn.y && y <= doubleBtn.y + doubleBtn.h) this.claimDoubleChips();
     }
   }
 
@@ -2116,6 +2454,27 @@ class GameEngine {
       if (this.state === 'revive') this.drawRevive();
       if (this.state === 'result') this.drawResult();
     }
+    if (this.adNotice) this.drawAdNotice();
+  }
+
+  drawAdNotice() {
+    const a = clamp(this.adNotice.timer / 2.4, 0, 1);
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '800 13px "Segoe UI", sans-serif';
+    const w = Math.min(420, viewW - 40);
+    const x = viewW / 2 - w / 2;
+    const y = viewH - 72;
+    ctx.fillStyle = 'rgba(2, 8, 16, .88)';
+    ctx.strokeStyle = '#ff8fa3';
+    ctx.lineWidth = 1.5;
+    roundRectPath(ctx, x, y, w, 36, 8);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#ffb3c1';
+    ctx.fillText(this.adNotice.text, viewW / 2, y + 18);
+    ctx.restore();
   }
 
   drawBackdrop() {
@@ -2261,7 +2620,7 @@ class GameEngine {
     ctx.textAlign = 'center';
     ctx.fillText(isTouchDevice()
       ? 'DRAG LEFT SIDE TO MOVE · TAP RIGHT SIDE TO DASH'
-      : 'WASD / ARROWS MOVE · SPACE DASH · ESC PAUSE · M MUTE', viewW / 2, viewH - 22);
+      : 'WASD / ARROWS MOVE · SPACE DASH · P PAUSE · M MUTE', viewW / 2, viewH - 22);
     ctx.textAlign = 'right';
     this.drawMuteButton(viewW - pad, viewH - 52);
     if (this.state === 'playing' || this.state === 'paused') this.drawPauseIcon(viewW - pad, viewH - 100);
@@ -2385,6 +2744,7 @@ class GameEngine {
     ctx.font = '600 13px "Segoe UI", sans-serif';
     ctx.fillStyle = '#7f9bac';
     ctx.fillText(`TOTAL CHIPS: 💾 ${this.meta.chips}   ·   BEST: ${fmtTime(this.meta.bestScore?.time || 0)} (${this.meta.bestScore?.kills || 0} KILLS)`, viewW / 2, viewH * .45);
+    this.drawCgProfile();
 
     this.drawMuteButton(viewW - Math.max(18, viewW * .025));
 
@@ -2452,14 +2812,17 @@ class GameEngine {
 
     const supply = this.supplyButton();
     const claimed = dailyClaimed(this.meta);
-    const supHov = pointer.x >= supply.x && pointer.x <= supply.x + supply.w && pointer.y >= supply.y && pointer.y <= supply.y + supply.h;
-    ctx.fillStyle = claimed ? 'rgba(80, 80, 80, .2)' : (supHov ? 'rgba(255, 224, 109, .28)' : 'rgba(255, 224, 109, .14)');
-    ctx.strokeStyle = claimed ? '#555' : '#ffe06d';
-    ctx.strokeRect(supply.x, supply.y, supply.w, supply.h);
-    ctx.fillRect(supply.x, supply.y, supply.w, supply.h);
-    ctx.fillStyle = claimed ? '#777' : '#fff';
-    ctx.font = '800 12px "Segoe UI", sans-serif';
-    ctx.fillText(claimed ? '✓ CLAIMED (+500)' : '🎬 FREE +500 CHIPS', supply.x + supply.w / 2, supply.y + supply.h / 2);
+    const adsOff = !this.sdk.adsUsable();
+    const supHov = !adsOff && pointer.x >= supply.x && pointer.x <= supply.x + supply.w && pointer.y >= supply.y && pointer.y <= supply.y + supply.h;
+    if (!adsOff) {
+      ctx.fillStyle = claimed ? 'rgba(80, 80, 80, .2)' : (supHov ? 'rgba(255, 224, 109, .28)' : 'rgba(255, 224, 109, .14)');
+      ctx.strokeStyle = claimed ? '#555' : '#ffe06d';
+      ctx.strokeRect(supply.x, supply.y, supply.w, supply.h);
+      ctx.fillRect(supply.x, supply.y, supply.w, supply.h);
+      ctx.fillStyle = claimed ? '#777' : '#fff';
+      ctx.font = '800 12px "Segoe UI", sans-serif';
+      ctx.fillText(claimed ? '✓ CLAIMED (+500)' : '🎬 FREE +500 CHIPS', supply.x + supply.w / 2, supply.y + supply.h / 2);
+    }
 
     ctx.fillStyle = '#b978ff'; ctx.shadowColor = '#b978ff'; ctx.shadowBlur = 20;
     ctx.font = '900 28px "Segoe UI", sans-serif';
@@ -2631,14 +2994,17 @@ class GameEngine {
     });
 
     const reroll = this.rerollButton();
-    const rHov = pointer.x >= reroll.x && pointer.x <= reroll.x + reroll.w && pointer.y >= reroll.y && pointer.y <= reroll.y + reroll.h;
-    ctx.fillStyle = this.rerollUsed ? 'rgba(50, 50, 50, .3)' : rHov ? 'rgba(255, 224, 109, .25)' : 'rgba(255, 224, 109, .12)';
-    ctx.strokeStyle = this.rerollUsed ? '#444' : '#ffe06d';
-    ctx.strokeRect(reroll.x, reroll.y, reroll.w, reroll.h);
-    ctx.fillRect(reroll.x, reroll.y, reroll.w, reroll.h);
-    ctx.fillStyle = this.rerollUsed ? '#666' : '#fff';
-    ctx.font = '800 12px "Segoe UI", sans-serif';
-    ctx.fillText(this.rerollUsed ? 'REROLL USED' : '🎬 WATCH AD TO REROLL', viewW / 2, reroll.y + reroll.h / 2 + 1);
+    const adsOff = !this.sdk.adsUsable();
+    if (!adsOff) {
+      const rHov = pointer.x >= reroll.x && pointer.x <= reroll.x + reroll.w && pointer.y >= reroll.y && pointer.y <= reroll.y + reroll.h;
+      ctx.fillStyle = this.rerollUsed ? 'rgba(50, 50, 50, .3)' : rHov ? 'rgba(255, 224, 109, .25)' : 'rgba(255, 224, 109, .12)';
+      ctx.strokeStyle = this.rerollUsed ? '#444' : '#ffe06d';
+      ctx.strokeRect(reroll.x, reroll.y, reroll.w, reroll.h);
+      ctx.fillRect(reroll.x, reroll.y, reroll.w, reroll.h);
+      ctx.fillStyle = this.rerollUsed ? '#666' : '#fff';
+      ctx.font = '800 12px "Segoe UI", sans-serif';
+      ctx.fillText(this.rerollUsed ? 'REROLL USED' : '🎬 WATCH AD TO REROLL', viewW / 2, reroll.y + reroll.h / 2 + 1);
+    }
     ctx.restore();
   }
 
@@ -2657,16 +3023,18 @@ class GameEngine {
     ctx.fillText(`SYSTEM SHUTDOWN IN: ${rest}S`, viewW / 2, viewH * .42);
 
     const btn = this.reviveModalButton();
-    const hov = pointer.x >= btn.x && pointer.x <= btn.x + btn.w && pointer.y >= btn.y && pointer.y <= btn.y + btn.h;
-    ctx.fillStyle = hov ? 'rgba(107, 245, 255, .3)' : 'rgba(107, 245, 255, .15)';
-    ctx.strokeStyle = '#6bf5ff';
-    ctx.lineWidth = 2.5;
-    ctx.shadowColor = '#6bf5ff'; ctx.shadowBlur = hov ? 30 : 15;
-    ctx.strokeRect(btn.x, btn.y, btn.w, btn.h);
-    ctx.fillRect(btn.x, btn.y, btn.w, btn.h);
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = '#fff'; ctx.font = '900 15px "Segoe UI", sans-serif';
-    ctx.fillText('🎬 WATCH AD TO REVIVE & EMP', viewW / 2, btn.y + btn.h / 2 + 1);
+    if (this.sdk.adsUsable()) {
+      const hov = pointer.x >= btn.x && pointer.x <= btn.x + btn.w && pointer.y >= btn.y && pointer.y <= btn.y + btn.h;
+      ctx.fillStyle = hov ? 'rgba(107, 245, 255, .3)' : 'rgba(107, 245, 255, .15)';
+      ctx.strokeStyle = '#6bf5ff';
+      ctx.lineWidth = 2.5;
+      ctx.shadowColor = '#6bf5ff'; ctx.shadowBlur = hov ? 30 : 15;
+      ctx.strokeRect(btn.x, btn.y, btn.w, btn.h);
+      ctx.fillRect(btn.x, btn.y, btn.w, btn.h);
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = '#fff'; ctx.font = '900 15px "Segoe UI", sans-serif';
+      ctx.fillText('🎬 WATCH AD TO REVIVE & EMP', viewW / 2, btn.y + btn.h / 2 + 1);
+    }
 
     ctx.fillStyle = '#777'; ctx.font = '600 11px "Segoe UI", sans-serif';
     ctx.fillText('[ GIVE UP ]', viewW / 2, viewH * .68 + 18);
@@ -2691,15 +3059,26 @@ class GameEngine {
     ctx.fillStyle = '#ffe06d'; ctx.font = '800 16px "Segoe UI", sans-serif';
     ctx.fillText(`REWARD: 💾 +${this.chipsRun} DATA CHIPS`, viewW / 2, viewH * .5);
 
-    const doubleBtn = this.doubleButton();
-    const dHov = pointer.x >= doubleBtn.x && pointer.x <= doubleBtn.x + doubleBtn.w && pointer.y >= doubleBtn.y && pointer.y <= doubleBtn.y + doubleBtn.h;
-    ctx.fillStyle = this.doubleClaimed ? 'rgba(50,50,50,.3)' : dHov ? 'rgba(255, 224, 109, .3)' : 'rgba(255, 224, 109, .15)';
-    ctx.strokeStyle = this.doubleClaimed ? '#555' : '#ffe06d';
-    ctx.strokeRect(doubleBtn.x, doubleBtn.y, doubleBtn.w, doubleBtn.h);
-    ctx.fillRect(doubleBtn.x, doubleBtn.y, doubleBtn.w, doubleBtn.h);
-    ctx.fillStyle = this.doubleClaimed ? '#777' : '#fff';
-    ctx.font = '800 13px "Segoe UI", sans-serif';
-    ctx.fillText(this.doubleClaimed ? '✓ DOUBLED' : '🎬 DOUBLE CHIPS (x2)', viewW / 2, doubleBtn.y + doubleBtn.h / 2 + 1);
+    if (this.sdk.adsUsable() && !this.doubleClaimed) {
+      const doubleBtn = this.doubleButton();
+      const dHov = pointer.x >= doubleBtn.x && pointer.x <= doubleBtn.x + doubleBtn.w && pointer.y >= doubleBtn.y && pointer.y <= doubleBtn.y + doubleBtn.h;
+      ctx.fillStyle = dHov ? 'rgba(255, 224, 109, .3)' : 'rgba(255, 224, 109, .15)';
+      ctx.strokeStyle = '#ffe06d';
+      ctx.strokeRect(doubleBtn.x, doubleBtn.y, doubleBtn.w, doubleBtn.h);
+      ctx.fillRect(doubleBtn.x, doubleBtn.y, doubleBtn.w, doubleBtn.h);
+      ctx.fillStyle = '#fff';
+      ctx.font = '800 13px "Segoe UI", sans-serif';
+      ctx.fillText('🎬 DOUBLE CHIPS (x2)', viewW / 2, doubleBtn.y + doubleBtn.h / 2 + 1);
+    } else if (this.doubleClaimed) {
+      const doubleBtn = this.doubleButton();
+      ctx.fillStyle = 'rgba(50,50,50,.3)';
+      ctx.strokeStyle = '#555';
+      ctx.strokeRect(doubleBtn.x, doubleBtn.y, doubleBtn.w, doubleBtn.h);
+      ctx.fillRect(doubleBtn.x, doubleBtn.y, doubleBtn.w, doubleBtn.h);
+      ctx.fillStyle = '#777';
+      ctx.font = '800 13px "Segoe UI", sans-serif';
+      ctx.fillText('✓ DOUBLED', viewW / 2, doubleBtn.y + doubleBtn.h / 2 + 1);
+    }
 
     const button = this.resultButton();
     const hover = pointer.x >= button.x && pointer.x <= button.x + button.w && pointer.y >= button.y && pointer.y <= button.y + button.h;
@@ -2725,9 +3104,32 @@ class GameEngine {
 }
 
 engine = new GameEngine();
+
+/* First-time onboarding: keyboard overlay shown once over the opening frame.
+   Skippable via the single "Got it!" button (one-screen tutorial). */
+function maybeShowTutorial() {
+  try { if (localStorage.getItem(TUTORIAL_KEY)) return; } catch (e) { return; }
+  const el = document.getElementById('overlay-tutorial');
+  if (!el) return;
+  el.classList.remove('hide');
+}
+document.getElementById('tut-gotit').addEventListener('click', () => {
+  document.getElementById('overlay-tutorial').classList.add('hide');
+  try { localStorage.setItem(TUTORIAL_KEY, '1'); } catch (e) {}
+  /* A visibilitychange during the tutorial may have paused the run — dismiss
+     must hand the player a live game, not a frozen pause screen. */
+  if (engine.state === 'paused') engine.resume();
+});
+
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
-    if (engine.state === 'playing') engine.pause();
+    /* CrazyGames expects pause + save when the tab is hidden so progress
+       survives an unexpected close (menu Save Run is not the only path). */
+    if (engine.state === 'playing') {
+      try { storageSet(engine.saveKey, JSON.stringify(engine.serializeRun())); } catch (e) {}
+      engine.refreshMenuSave();
+      engine.pause();
+    }
     engine.audio.suspend();
   } else {
     engine.audio.resume();
